@@ -159,6 +159,25 @@ Tasks with the same **intent** but different **parameters** reuse the same saved
 
 Ordinal words (first/second/third) are normalized to `{nth}` during fingerprinting. The actual value is extracted and passed as a runtime variable to the pattern.
 
+### 6. Coding Agent — Semantic Code Map
+The Ecogent **Coding Agent** solves the "context bloat" problem of standard coding agents (which typically run expensive recursive searches across the entire repo for every prompt). 
+- **Active Memory:** When the agent writes code, it stores a tiny metadata JSON entry in ChromaDB mapping the component/feature to its exact file path and dependencies.
+- **Surgical Escalation:** When you ask to modify a feature later (e.g., "update the login button"), the local supervisor queries ChromaDB, retrieves the exact file path instantly, and sends **only** that specific file to the Cloud LLM.
+- **Sync Layer:** Solves cache invalidation through Active Sync (tools update DB automatically), Passive Sync (background OS watcher), and JIT Verification (checking if a file still exists before calling the cloud).
+- **Result:** Zero path hallucination, massive reduction in token cost, and instant code discovery.
+
+### 7. OS Agent — Vector-Backed Stateful Execution
+The **OS Agent** replaces dangerous, stateless Python `exec()` calls with a robust, stateful subprocess layer backed by ChromaDB.
+- **Semantic System Map:** Critical system files (configs, build scripts) are registered in ChromaDB. If you ask to "edit the database config," the agent queries the Vector DB for the exact path instead of running a slow `ls` search.
+- **Persistent Terminals:** Runs commands in a stateful background terminal (`subprocess.Popen`). If the agent runs `cd backend`, the next command runs in the `backend` folder.
+- **Asynchronous Execution:** Long-running servers (like `npm run dev`) run in the background without freezing the CLI.
+
+### 8. Testing Agent — Token-Optimized QA
+The **Testing Agent** prevents the "token bloat" vulnerability that occurs when a test suite fails and dumps thousands of lines of logs into the LLM context.
+- **Semantic Test Discovery:** The agent queries ChromaDB for the exact test framework and file (e.g., `pytest tests/auth/test_login.py`) rather than hallucinating commands.
+- **Smart Paging & Truncation Layer:** If a test output exceeds 2,000 characters, the agent automatically truncates the middle of the log, returning only the Head (command run) and Tail (stack trace) to the Cloud LLM.
+- **Result:** Capped token usage and asynchronous background execution.
+
 ---
 
 ## Project Structure
@@ -226,7 +245,7 @@ The agent routing architecture is designed to plug in new specialist agents:
 |---|---|---|
 | `browser_agent` | ✅ Implemented | Web automation with record/replay + self-healing |
 | `os_agent` | ✅ Implemented | File system, terminal, OS-level tasks |
-| `code_agent` | 🔜 Planned | Code writing, bug fixing, debugging |
+| `code_agent` | ✅ Implemented | Code writing/debugging with Semantic Code Map (ChromaDB) |
 | `data_agent` | 🔜 Planned | CSV/Excel processing, data analysis |
 | `api_agent` | 🔜 Planned | REST API calls, webhook handling |
 
