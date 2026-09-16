@@ -1,0 +1,32 @@
+[
+  {
+    "id": "task_1",
+    "description": "Rename the file report.txt to final_report.txt",
+    "expected_complexity": "simple",
+    "expected_execution": "local"
+  },
+  {
+    "id": "task_2",
+    "description": "Calculate the average score in results.csv",
+    "expected_complexity": "moderate",
+    "expected_execution": "local"
+  },
+  {
+    "id": "task_3",
+    "description": "Build a comprehensive web scraper using Playwright that logs into example.com, extracts the user dashboard table, and saves it to a local SQLite database.",
+    "expected_complexity": "complex",
+    "expected_execution": "cloud"
+  },
+  {
+    "id": "task_4",
+    "description": "Check if data.json exists in this folder",
+    "expected_complexity": "simple",
+    "expected_execution": "local"
+  },
+  {
+    "id": "task_5",
+    "description": "Can you design a microservices architecture for a scalable e-commerce backend and provide docker-compose files for it?",
+    "expected_complexity": "complex",
+    "expected_execution": "cloud"
+  }
+]

@@ -1,0 +1,20 @@
+# Ecogent Experiment - Python Dependencies
+# Install: pip install -r requirements.txt
+
+chromadb>=0.4.0
+numpy>=1.24.0
+pydantic>=2.0.0
+psutil>=5.9.0
+pytest>=7.0.0
+click>=8.0.0
+rich>=10.11.0
+pandas>=2.0.0
+scikit-learn>=1.3.0
+flaml[automl]>=2.1.1
+playwright>=1.40.0
+
+# LangChain ecosystem
+langchain>=0.2.0
+langchain-core>=0.2.0
+langchain-community>=0.2.0
+langgraph>=0.1.0

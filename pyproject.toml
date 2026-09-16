@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ecogent"
+version = "0.1.0"
+description = "A Local-First Multi-Agent Architecture for Reducing LLM Costs Through Persistent Tools and Adaptive Model Routing"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Ecogent Research"}
+]
+
+dependencies = [
+    "chromadb>=0.4.0",
+    "numpy>=1.24.0",
+    "pydantic>=2.0.0",
+    "psutil>=5.9.0",
+    "click>=8.0.0",
+    "rich>=10.11.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+]
+langgraph = [
+    "langgraph>=0.1.0",
+]
+
+[project.scripts]
+ecogent = "ecogent_experiment.cli:cli"
+
+[tool.setuptools]
+packages = ["ecogent_experiment"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

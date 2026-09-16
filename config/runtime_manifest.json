@@ -1,0 +1,42 @@
+{
+  "_comment": "Platform-specific runtime download manifest for llama.cpp prebuilt binaries",
+  "_version": "b10809",
+  "_source": "https://github.com/ggml-org/llama.cpp/releases/tag/b10809",
+  "windows-x64": {
+    "runtime": "llama.cpp",
+    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10809/llama-b10809-bin-win-cpu-x64.zip",
+    "archive_type": "zip",
+    "binary_name": "llama-cli.exe",
+    "sha256": ""
+  },
+  "linux-x64": {
+    "runtime": "llama.cpp",
+    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10809/llama-b10809-bin-ubuntu-x64.tar.gz",
+    "archive_type": "tar.gz",
+    "binary_name": "llama-cli",
+    "sha256": ""
+  },
+  "macos-arm64": {
+    "runtime": "llama.cpp",
+    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10809/llama-b10809-bin-macos-arm64.tar.gz",
+    "archive_type": "tar.gz",
+    "binary_name": "llama-cli",
+    "sha256": ""
+  },
+  "macos-x64": {
+    "runtime": "llama.cpp",
+    "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10809/llama-b10809-bin-macos-x64.tar.gz",
+    "archive_type": "tar.gz",
+    "binary_name": "llama-cli",
+    "sha256": ""
+  },
+  "model": {
+    "name": "SmolLM2-135M-Instruct",
+    "format": "GGUF",
+    "quantization": "Q4_K_M",
+    "parameters": "135M",
+    "filename": "SmolLM2-135M-Instruct-Q4_K_M.gguf",
+    "url": "https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q4_K_M.gguf",
+    "sha256": "2e8040ceae7815abe0dcb3540b9995eaa1fa0d2ca9e797d0a635ae4433c68c2d"
+  }
+}
