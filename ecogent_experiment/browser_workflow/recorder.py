@@ -45,14 +45,15 @@ from ecogent_experiment.browser_workflow.schema import (
 _RECORDING_SYSTEM_PROMPT = """You are a browser automation expert. 
 Your job is to guide a browser automation session step by step.
 
-Rules:
-- Propose ONE step at a time as a JSON object.
-- After each step, you will receive the execution result.
-- If a step fails, propose a corrected version.
+CRITICAL OUTPUT RULES:
+- Respond with RAW JSON ONLY. No markdown fences (```json), no explanation text, nothing before or after the JSON.
+- One step at a time. After each step, the system will report the result.
+- If a step fails, propose a corrected step JSON.
 - When the task is fully complete, respond with:
   {"done": true, "summary": "...description of what was accomplished..."}
 - Use specific CSS selectors (prefer #id over .class over tag).
 - For dynamic values, use {variable_name} placeholders (e.g. {query}, {category}).
+- For EXTRACT steps, set "output_key" to a key name to store the extracted value.
 - Keep descriptions concise but clear.
 
 Step JSON format:
@@ -92,8 +93,10 @@ Validation fields by type:
 
 _RECORDING_START = """Task to automate: "{task}"
 
-No workflow pattern exists yet for this task. You will guide the browser step by step.
-The system will execute each step and report back.
+Browser is open. Current page: {url}
+No workflow pattern exists yet. You will guide the browser step by step.
+After each step, you will receive the result AND a structured map of elements on the new page.
+Use those exact selectors — do NOT guess selectors.
 
 Propose Step 1 now."""
 
@@ -104,6 +107,9 @@ _STEP_SUCCESS_FEEDBACK = """Step {step_num} result:
   URL now  : {url}
   Title    : {title}
 
+Current page elements:
+{elements_map}
+
 Propose Step {next_num}. (Or respond with {{"done": true, "summary": "..."}} if the task is complete.)"""
 
 _STEP_FAILURE_FEEDBACK = """Step {step_num} result:
@@ -112,11 +118,14 @@ _STEP_FAILURE_FEEDBACK = """Step {step_num} result:
   Error  : {error}
   URL    : {url}
   Title  : {title}
-  
-Page content (truncated):
+
+Current page elements (use these exact selectors):
+{elements_map}
+
+Full page HTML (if needed for deeper inspection):
 {html_snippet}
 
-Please correct Step {step_num} with a different selector or approach."""
+Please correct Step {step_num} using the exact selectors shown above."""
 
 _MAX_STEPS = 25        # Safety limit
 _MAX_RETRIES_PER_STEP = 3  # Max correction attempts per step
@@ -139,7 +148,7 @@ class BrowserRecordingAgent:
         self,
         pattern_store: BrowserPatternStore,
         cloud_provider,
-        headless: bool = True,
+        headless: bool = False,
         screenshots_dir: Optional[str] = None,
     ):
         self.pattern_store = pattern_store
@@ -176,12 +185,6 @@ class BrowserRecordingAgent:
 
         _log(f"\n  [bold cyan][🎬 BROWSER RECORDING][/bold cyan] Starting step-by-step recording...")
 
-        # Build initial conversation
-        conversation = (
-            f"{_RECORDING_SYSTEM_PROMPT}\n\n"
-            f"{_RECORDING_START.format(task=task)}"
-        )
-
         recorded_steps: List[BrowserStep] = []
         step_audit: List[StepAudit] = []
         extracted_data: Dict = {}
@@ -194,13 +197,26 @@ class BrowserRecordingAgent:
                 screenshots_dir=self.screenshots_dir,
             ) as engine:
                 page = engine.new_page()
+                page_ctx = engine.get_page_context(page)
                 step_num = 1
 
+                # Build initial conversation
+                conversation = (
+                    f"{_RECORDING_SYSTEM_PROMPT}\n\n"
+                    f"{_RECORDING_START.format(task=task, url=page_ctx.url, elements_map=page_ctx.elements_map or '(blank page)')}"
+                )
+
+                parse_fail_count = 0
                 for _ in range(_MAX_STEPS):
                     # ── Ask LLM for next step ──────────────────────────
                     raw = self.cloud_provider.generate_plan(conversation)
                     cloud_calls += 1
                     llm_text = raw.get("answer", "")
+
+                    # Detect API-level errors (not JSON parse failures)
+                    if raw.get("error") or llm_text.startswith("Error calling"):
+                        _log(f"  [bold red]✗[/bold red] Cloud API error: {llm_text[:200]}")
+                        break
 
                     # Check if LLM says done
                     done_data = self._parse_done(llm_text)
@@ -211,9 +227,14 @@ class BrowserRecordingAgent:
                     # Parse step JSON from LLM response
                     step_json = self._parse_step_json(llm_text)
                     if not step_json:
-                        _log(f"  [yellow]⚠[/yellow] LLM response not parseable, asking again...")
-                        conversation += f"\n\nSystem: Could not parse your response as JSON. Please respond with a valid step JSON object."
+                        parse_fail_count += 1
+                        if parse_fail_count >= 3:
+                            _log(f"  [bold red]✗[/bold red] LLM failed to return valid JSON 3 times. Stopping.")
+                            break
+                        _log(f"  [yellow]⚠[/yellow] LLM response not parseable, asking again... ({parse_fail_count}/3)")
+                        conversation += f"\n\nSystem: Could not parse your response. Please respond ONLY with a valid JSON object for the next step. No markdown fences, no explanation."
                         continue
+                    parse_fail_count = 0  # Reset on success
 
                     action = step_json.get("action", {})
                     validation = step_json.get("validation", {})
@@ -234,16 +255,17 @@ class BrowserRecordingAgent:
                         page_ctx = engine.get_page_context(page)
 
                         if not action_result.success:
-                            feedback = _STEP_FAILURE_FEEDBACK.format(
+                            # Build a one-shot recovery context with elements_map (NOT added to permanent history)
+                            recovery_context = conversation + "\n\n" + _STEP_FAILURE_FEEDBACK.format(
                                 step_num=step_num,
                                 action=json.dumps(action),
                                 error=action_result.error,
                                 url=page_ctx.url,
                                 title=page_ctx.title,
-                                html_snippet=page_ctx.html_snippet[:2000],
+                                elements_map=page_ctx.elements_map or "(no elements found)",
+                                html_snippet=page_ctx.html_snippet,
                             )
-                            conversation += f"\n\nSystem: {feedback}"
-                            raw2 = self.cloud_provider.generate_plan(conversation)
+                            raw2 = self.cloud_provider.generate_plan(recovery_context)
                             cloud_calls += 1
                             ai_recovery_count += 1
                             this_ai_recovered = True
@@ -251,6 +273,8 @@ class BrowserRecordingAgent:
                             if corrected:
                                 action = corrected.get("action", action)
                                 validation = corrected.get("validation", validation)
+                                # Only add a concise note to permanent history
+                                conversation += f"\n\nSystem: Step {step_num} action failed ({action_result.error[:80]}). Trying corrected action."
                             continue
 
                         # Collect extracted data
@@ -270,28 +294,29 @@ class BrowserRecordingAgent:
                             )
                             _log(f"  [green]✓[/green] Step {step_num}: {description}")
 
-                            # Report success back to LLM
+                            # Report success back to LLM with the NEW page's element map
                             conversation += "\n\nSystem: " + _STEP_SUCCESS_FEEDBACK.format(
                                 step_num=step_num,
                                 validation_detail=validation_result.detail,
                                 extracted=extracted_str,
                                 url=page_ctx.url,
                                 title=page_ctx.title,
+                                elements_map=page_ctx.elements_map or "(no elements found)",
                                 next_num=step_num + 1,
                             )
                             break
                         else:
-                            # Validation failed — ask LLM to correct
-                            feedback = _STEP_FAILURE_FEEDBACK.format(
+                            # Validation failed — one-shot recovery with elements_map (not added to permanent history)
+                            recovery_context = conversation + "\n\n" + _STEP_FAILURE_FEEDBACK.format(
                                 step_num=step_num,
                                 action=json.dumps(action),
                                 error=f"Validation failed: {validation_result.detail}",
                                 url=page_ctx.url,
                                 title=page_ctx.title,
-                                html_snippet=page_ctx.html_snippet[:2000],
+                                elements_map=page_ctx.elements_map or "(no elements found)",
+                                html_snippet=page_ctx.html_snippet,
                             )
-                            conversation += f"\n\nSystem: {feedback}"
-                            raw3 = self.cloud_provider.generate_plan(conversation)
+                            raw3 = self.cloud_provider.generate_plan(recovery_context)
                             cloud_calls += 1
                             ai_recovery_count += 1
                             this_ai_recovered = True
@@ -299,6 +324,7 @@ class BrowserRecordingAgent:
                             if corrected:
                                 action = corrected.get("action", action)
                                 validation = corrected.get("validation", validation)
+                                conversation += f"\n\nSystem: Step {step_num} validation failed ({validation_result.detail[:80]}). Trying corrected action."
 
                     # Record step regardless of final outcome
                     browser_step = BrowserStep(

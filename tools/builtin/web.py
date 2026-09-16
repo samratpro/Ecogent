@@ -62,7 +62,7 @@ def _fetch(url: str, timeout: int = 15) -> str:
     # Last resort: playwright
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
-        b = p.chromium.launch(headless=True)
+        b = p.chromium.launch(headless=False)
         pg = b.new_page()
         pg.goto(url, timeout=30000)
         html = pg.content()

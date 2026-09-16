@@ -39,7 +39,7 @@ class BrowserWorkflowManager:
         chroma_dir: str,
         projects_dir: str,
         cloud_provider=None,
-        headless: bool = True,
+        headless: bool = False,
         screenshots_dir: Optional[str] = None,
     ):
         self.project_id = project_id

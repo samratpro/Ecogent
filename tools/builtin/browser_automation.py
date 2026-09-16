@@ -29,7 +29,7 @@ def browser_task(
     cloud_provider=None,
     chroma_dir: str = "",
     projects_dir: str = "",
-    headless: bool = True,
+    headless: bool = False,
     console=None,
     **kwargs,
 ) -> dict:

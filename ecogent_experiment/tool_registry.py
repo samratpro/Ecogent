@@ -235,6 +235,24 @@ class ToolRegistry:
         except Exception:
             return False
 
+    def deregister_project_tools(self, project_id: str, collection: str = "project_tools") -> int:
+        """
+        Remove all tools belonging to a specific project.
+        """
+        if collection not in self._collections:
+            return 0
+            
+        coll = self._collections[collection]
+        try:
+            results = coll.get(where={"project_id": project_id})
+            if results and results.get("ids"):
+                ids_to_delete = results["ids"]
+                coll.delete(ids=ids_to_delete)
+                return len(ids_to_delete)
+        except Exception:
+            pass
+        return 0
+
     def list_tools(self, collection: str = "builtin_tools") -> list[dict]:
         """
         List all tools in a collection.

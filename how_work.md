@@ -27,3 +27,7 @@ go to amazon go this category check price of these products compare price and gi
 then 1 days later said to do same task again on that chat then agent can reuse that json workflow to reduce AI cost but json should have all I mean where to cick which to select where to fillup and validation check each steps
 when reuse if any steps validation fail then communicate with AI again
 this will do browser agent when a task base on browser
+
+--------------------------
+coding agent
+----------------------

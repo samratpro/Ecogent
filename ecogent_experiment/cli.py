@@ -414,17 +414,18 @@ def chat():
         menu_text = (
             "[bold]1.[/bold] Start new session\n"
             "[bold]2.[/bold] Load existing session\n"
-            "[bold]3.[/bold] Configure Cloud API Fallback\n"
-            "[bold]4.[/bold] Exit"
+            "[bold]3.[/bold] Delete existing session\n"
+            "[bold]4.[/bold] Configure Cloud API Fallback\n"
+            "[bold]5.[/bold] Exit"
         )
         console.print(Panel(menu_text, title="Main Menu", border_style="cyan", expand=False))
-        choice = Prompt.ask("Select an option", choices=["1", "2", "3", "4"], default="1")
+        choice = Prompt.ask("Select an option", choices=["1", "2", "3", "4", "5"], default="1")
         
-        if choice == "4":
+        if choice == "5":
             console.print("[dim]Exiting terminal. Goodbye![/dim]")
             break
             
-        if choice == "3":
+        if choice == "4":
             console.print()
             guide_text = (
                 "To configure your Cloud API Fallback providers (OpenAI, OpenRouter, Ollama):\n\n"
@@ -448,6 +449,46 @@ def chat():
             
         from ecogent_experiment.db import ProjectDB
         db = ProjectDB(root)
+        
+        if choice == "3":
+            projects = db.list_projects()
+            if not projects:
+                console.print("[yellow]No existing projects found to delete.[/yellow]")
+                continue
+                
+            table = Table(show_header=True, header_style="bold magenta", box=None)
+            table.add_column("No.")
+            table.add_column("Project ID")
+            table.add_column("Name")
+            
+            proj_list = list(projects.items())
+            for i, (pid, pdata) in enumerate(proj_list, 1):
+                table.add_row(f"[bold cyan]{i}.[/bold cyan]", pid, pdata["name"])
+            console.print(Panel(table, title="Delete Project", border_style="red", expand=False))
+            
+            sel = Prompt.ask(f"Select a project to delete [1-{len(proj_list)}]")
+            try:
+                idx = int(sel) - 1
+                if 0 <= idx < len(proj_list):
+                    del_pid = proj_list[idx][0]
+                    # Get chroma registry to delete tools
+                    from ecogent_experiment.tool_registry import ToolRegistry
+                    chroma_dir = os.path.join(root, "data", "chroma_db")
+                    try:
+                        tr = ToolRegistry(chroma_dir)
+                        deleted_tools = tr.deregister_project_tools(del_pid)
+                    except Exception as e:
+                        deleted_tools = 0
+                        
+                    if db.delete_project(del_pid):
+                        console.print(f"[bold green]Successfully deleted project:[/bold green] {del_pid}. Also deleted {deleted_tools} generated tools from ChromaDB.")
+                    else:
+                        console.print(f"[bold red]Failed to delete project:[/bold red] {del_pid}")
+                else:
+                    console.print("[yellow]Invalid choice. Returning to main menu.[/yellow]")
+            except ValueError:
+                console.print("[yellow]Invalid choice. Returning to main menu.[/yellow]")
+            continue
         
         project_id = None
         

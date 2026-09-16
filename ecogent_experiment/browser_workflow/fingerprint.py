@@ -46,6 +46,8 @@ _STOPWORDS = {
     "go", "open", "visit", "navigate", "click", "please", "just", "again",
     "same", "task", "do", "run", "repeat", "want", "need", "get", "tell",
     "give", "show", "make", "let", "try", "use", "back",
+    # Ordinal words — normalized separately via extract_task_variables()
+    "first", "second", "third", "fourth", "fifth", "top", "nth",
 }
 
 # Known action keywords that are worth keeping
@@ -89,30 +91,14 @@ def extract_url_domain(task: str) -> str:
     if domain_match:
         return domain_match.group(1).lower()
 
-    # Try known brand names mentioned without a TLD
-    known_brands = {
-        "amazon": "amazon",
-        "ebay": "ebay",
-        "google": "google",
-        "youtube": "youtube",
-        "twitter": "twitter",
-        "facebook": "facebook",
-        "instagram": "instagram",
-        "linkedin": "linkedin",
-        "reddit": "reddit",
-        "github": "github",
-        "wikipedia": "wikipedia",
-        "netflix": "netflix",
-        "spotify": "spotify",
-        "aliexpress": "aliexpress",
-        "walmart": "walmart",
-        "etsy": "etsy",
-        "shopify": "shopify",
-    }
-    task_lower = task.lower()
-    for brand, name in known_brands.items():
-        if re.search(rf"\b{brand}\b", task_lower):
-            return name
+    # Generic heuristic: capitalized word after action verbs likely a site name
+    # e.g. "visit Amazon", "go to Flipkart", "open Etsy"
+    brand_match = re.search(
+        r'\b(?:visit|go\s+to|open|on|at|use|check)\s+([A-Z][a-zA-Z0-9\-]{2,})\b',
+        task,
+    )
+    if brand_match:
+        return brand_match.group(1).lower()
 
     return ""
 
@@ -166,14 +152,17 @@ def task_to_fingerprint(task: str) -> str:
     """
     Convert a task description to a stable, comparable fingerprint string.
 
-    The fingerprint is order-invariant and stopword-free.
-    Used as the ChromaDB document embedding text and as the JSON filename stem.
+    Ordinals (first/second/third) are normalized to 'nth' so the same
+    base pattern matches regardless of which item the user asks for.
+    The actual ordinal is extracted separately via extract_task_variables().
 
     Returns:
-        e.g. "amazon check compare laptop price"
+        e.g. "amazon nth price product search"
     """
     domain = extract_url_domain(task)
-    keywords = extract_keywords(task, domain)
+    # Normalize ordinals before keyword extraction so fingerprint is position-agnostic
+    normalized = _normalize_ordinals(task)
+    keywords = extract_keywords(normalized, domain)
 
     # Sort for order-invariance
     sorted_kw = sorted(set(keywords))
@@ -214,3 +203,70 @@ def tasks_are_similar(task_a: str, task_b: str, threshold: float = 0.5) -> bool:
     union = kw_a | kw_b
     jaccard = len(intersection) / len(union)
     return jaccard >= threshold
+
+
+# ---------------------------------------------------------------------------
+# Ordinal normalization and variable extraction
+# ---------------------------------------------------------------------------
+
+_ORDINAL_MAP = {
+    # words → index (1-based)
+    "first": 1, "1st": 1, "one": 1,
+    "second": 2, "2nd": 2, "two": 2,
+    "third": 3, "3rd": 3, "three": 3,
+    "fourth": 4, "4th": 4, "four": 4,
+    "fifth": 5, "5th": 5, "five": 5,
+    "sixth": 6, "6th": 6,
+    "seventh": 7, "7th": 7,
+    "eighth": 8, "8th": 8,
+    "ninth": 9, "9th": 9,
+    "tenth": 10, "10th": 10,
+    "top": 1,  # "top product" = first
+    "last": -1,  # -1 = last item
+}
+
+_QUERY_PATTERNS = [
+    # "search <query>", "search for <query>", "find <query>"
+    r"search\s+(?:for\s+)?['\"]?([a-zA-Z0-9 ]+?)['\"]?\s+(?:on|in|at|and|$)",
+    r"search\s+(?:for\s+)?['\"]?([a-zA-Z0-9 ]+)['\"]?",
+]
+
+
+def _normalize_ordinals(task: str) -> str:
+    """Replace ordinal words with 'nth' for fingerprint normalization."""
+    pattern = r'\b(' + '|'.join(re.escape(k) for k in _ORDINAL_MAP) + r')\b'
+    return re.sub(pattern, 'nth', task, flags=re.I)
+
+
+def extract_task_variables(task: str) -> dict:
+    """
+    Extract runtime variables from a task description.
+
+    Returns a dict of variables that will be passed to the browser pattern
+    as substitution variables, e.g.:
+      {"nth": "2", "query": "baby product"}
+
+    This allows ONE saved pattern to serve many variations:
+      - "first product price"  → {nth: 1}
+      - "second product price" → {nth: 2}
+      - "third item"           → {nth: 3}
+    """
+    variables = {}
+    task_lower = task.lower()
+
+    # ── Extract ordinal / position ────────────────────────────────
+    for word, idx in _ORDINAL_MAP.items():
+        if re.search(rf'\b{re.escape(word)}\b', task_lower):
+            variables["nth"] = str(idx)
+            break
+    if "nth" not in variables:
+        variables["nth"] = "1"  # Default to first
+
+    # ── Extract search query ──────────────────────────────────
+    for pat in _QUERY_PATTERNS:
+        m = re.search(pat, task_lower)
+        if m:
+            variables["query"] = m.group(1).strip()
+            break
+
+    return variables

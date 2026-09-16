@@ -162,7 +162,8 @@ class PageContext(BaseModel):
     """Snapshot of page state — used when feeding context back to the LLM."""
     url: str = ""
     title: str = ""
-    html_snippet: str = ""  # Truncated for token efficiency
+    html_snippet: str = ""  # Cleaned HTML (only used for fallback recovery)
+    elements_map: str = ""  # Structured map of interactive elements + data (primary LLM input)
 
 
 # ---------------------------------------------------------------------------

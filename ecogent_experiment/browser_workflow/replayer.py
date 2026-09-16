@@ -60,7 +60,7 @@ class BrowserReplayEngine:
     JSON on disk, so future replays won't need recovery.
     """
 
-    def __init__(self, cloud_provider=None, headless: bool = True):
+    def __init__(self, cloud_provider=None, headless: bool = False):
         self.cloud_provider = cloud_provider
         self.headless = headless
 
@@ -263,7 +263,7 @@ class BrowserReplayEngine:
             error=error,
             url=page_ctx.url,
             title=page_ctx.title,
-            html_snippet=page_ctx.html_snippet[:2500],
+            html_snippet=page_ctx.html_snippet,
         )
 
         try:

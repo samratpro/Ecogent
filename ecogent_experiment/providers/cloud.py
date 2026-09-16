@@ -74,7 +74,7 @@ class OpenAIProvider(CloudLLMProvider):
                     "model": self.model_name
                 }
         except Exception as e:
-            return {"answer": f"Error calling OpenAI API: {e}", "input_tokens": 0, "output_tokens": 0, "model": self.model_name}
+            return {"answer": f"Error calling OpenAI API: {e}", "error": True, "input_tokens": 0, "output_tokens": 0, "model": self.model_name}
 
     def generate_workflow_tree(self, task: str) -> tuple[list[Dict[str, Any]], Dict[str, Any]]:
         prompt = WORKFLOW_PROMPT.format(task=task)
@@ -126,7 +126,7 @@ class OpenRouterProvider(CloudLLMProvider):
                     "model": self.model_name
                 }
         except Exception as e:
-            return {"answer": f"Error calling OpenRouter API: {e}", "input_tokens": 0, "output_tokens": 0, "model": self.model_name}
+            return {"answer": f"Error calling OpenRouter API: {e}", "error": True, "input_tokens": 0, "output_tokens": 0, "model": self.model_name}
 
     def generate_workflow_tree(self, task: str) -> tuple[list[Dict[str, Any]], Dict[str, Any]]:
         prompt = WORKFLOW_PROMPT.format(task=task)
@@ -188,9 +188,9 @@ class OllamaProvider(CloudLLMProvider):
                 error_msg = error_body.get("error", str(e))
             except Exception:
                 error_msg = str(e)
-            return {"answer": f"Error calling Ollama API: {error_msg}", "input_tokens": 0, "output_tokens": 0, "model": self.model_name}
+            return {"answer": f"Error calling Ollama API: {error_msg}", "error": True, "input_tokens": 0, "output_tokens": 0, "model": self.model_name}
         except Exception as e:
-            return {"answer": f"Error calling Ollama API: {e}", "input_tokens": 0, "output_tokens": 0, "model": self.model_name}
+            return {"answer": f"Error calling Ollama API: {e}", "error": True, "input_tokens": 0, "output_tokens": 0, "model": self.model_name}
 
     def generate_workflow_tree(self, task: str) -> tuple[list[Dict[str, Any]], Dict[str, Any]]:
         prompt = WORKFLOW_PROMPT.format(task=task)

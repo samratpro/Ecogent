@@ -105,3 +105,20 @@ class ProjectDB:
         
         with open(chat_file, "w", encoding="utf-8") as f:
             json.dump(chat_data, f, indent=4)
+
+    def delete_project(self, project_id: str) -> bool:
+        """Deletes a project and its associated files."""
+        data = self._load()
+        if "projects" in data and project_id in data["projects"]:
+            proj = data["projects"][project_id]
+            import shutil
+            # Remove project directory
+            proj_dir = os.path.join(self.root_dir, proj.get("dir", ""))
+            if os.path.exists(proj_dir) and os.path.isdir(proj_dir):
+                shutil.rmtree(proj_dir, ignore_errors=True)
+            
+            # Remove project from DB
+            del data["projects"][project_id]
+            self._save(data)
+            return True
+        return False

@@ -15,6 +15,7 @@ Design principles:
 import os
 import re
 import time
+from bs4 import BeautifulSoup
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
@@ -30,10 +31,197 @@ from ecogent_experiment.browser_workflow.schema import (
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_TIMEOUT_MS = 8000      # Default action timeout
-NAVIGATION_TIMEOUT_MS = 15000  # Navigate actions get more time
-EXTRACT_TIMEOUT_MS = 5000      # Text extraction timeout
-HTML_SNIPPET_CHARS = 4000      # How much HTML to send to AI on failure
+DEFAULT_TIMEOUT_MS = 15000     # Default action timeout
+NAVIGATION_TIMEOUT_MS = 25000  # Navigate actions get more time
+EXTRACT_TIMEOUT_MS = 8000      # Text extraction timeout
+HTML_SNIPPET_CHARS = 80000      # How much HTML to send to AI on failure
+
+
+# ---------------------------------------------------------------------------
+# HTML Cleaner for LLM Recovery Context
+# ---------------------------------------------------------------------------
+
+def clean_html_for_llm(html_content: str) -> str:
+    """Full cleaned HTML - used only for recovery fallback context."""
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # 1. Remove unwanted tags entirely
+        for tag in soup(['script', 'style', 'svg', 'path', 'meta', 'link', 'noscript', 'iframe']):
+            tag.decompose()
+            
+        # 2. Clean attributes and truncate text
+        keep_attrs = {'id', 'class', 'name', 'type', 'placeholder', 'aria-label', 'role', 'href'}
+        
+        for tag in soup.find_all(True):
+            attrs_to_remove = [attr for attr in tag.attrs if attr not in keep_attrs]
+            for attr in attrs_to_remove:
+                del tag[attr]
+            for attr in tag.attrs:
+                if isinstance(tag[attr], list):
+                    tag[attr] = " ".join(tag[attr])
+
+        # 3. Truncate long text nodes
+        for text_node in soup.find_all(string=True):
+            text = text_node.string.strip()
+            if text:
+                if len(text) > 100:
+                    text_node.string.replace_with(text[:97] + "...")
+                else:
+                    text_node.string.replace_with(text)
+            else:
+                text_node.extract()
+                
+        cleaned = str(soup)
+        cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip()
+        return cleaned
+    except Exception:
+        return html_content[:2000]
+
+
+def extract_elements_map(html_content: str) -> str:
+    """
+    Use BeautifulSoup to extract a structured, token-efficient map of
+    interactive elements and data-bearing elements from the live page.
+
+    Returns a short, human-readable string like:
+        INPUTS:
+          - selector: #twotabsearchtextbox  type=text  placeholder="Search Amazon"
+        BUTTONS:
+          - selector: #nav-search-submit-button  text="Go"
+        LINKS (top 10):
+          - selector: a[href*="/dp/"]  text="Aveeno Baby Gift Set..."
+        PRICES:
+          - selector: .a-price-whole  text="1,437"
+        HEADINGS:
+          - <h1> Baby Products
+          - <h2> Aveeno Baby Welcome...
+
+    This is the PRIMARY input to the LLM — not raw HTML.
+    """
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+
+        # Remove noise tags
+        for tag in soup(['script', 'style', 'svg', 'path', 'noscript', 'iframe', 'meta', 'link']):
+            tag.decompose()
+
+        lines = []
+
+        # ── INPUTS ──────────────────────────────────────────
+        inputs = soup.find_all('input', limit=20)
+        if inputs:
+            lines.append("INPUTS:")
+            for el in inputs:
+                itype = el.get('type', 'text')
+                if itype in ('hidden', 'submit'):
+                    continue
+                sel = _best_selector(el)
+                placeholder = el.get('placeholder', '')
+                aria = el.get('aria-label', '')
+                name = el.get('name', '')
+                info = f"  - selector: {sel}  type={itype}"
+                if placeholder: info += f"  placeholder='{placeholder[:50]}'"
+                if aria:        info += f"  aria-label='{aria[:50]}'"
+                if name:        info += f"  name={name}"
+                lines.append(info)
+
+        # ── BUTTONS ─────────────────────────────────────────
+        buttons = soup.find_all(['button', 'input[type="submit"]'], limit=15)
+        submit_inputs = soup.find_all('input', type='submit', limit=5)
+        all_buttons = list(buttons) + list(submit_inputs)
+        if all_buttons:
+            lines.append("BUTTONS:")
+            for el in all_buttons[:15]:
+                sel = _best_selector(el)
+                text = (el.get_text(strip=True) or el.get('value', '') or el.get('aria-label', ''))[:60]
+                lines.append(f"  - selector: {sel}  text='{text}'")
+
+        # ── SELECT DROPDOWNS ────────────────────────────────
+        selects = soup.find_all('select', limit=5)
+        if selects:
+            lines.append("SELECTS:")
+            for el in selects:
+                sel = _best_selector(el)
+                options = [o.get_text(strip=True) for o in el.find_all('option')][:6]
+                lines.append(f"  - selector: {sel}  options={options}")
+
+        # ── PRICES ──────────────────────────────────────────
+        # Price pattern: elements with currency symbols or price class names
+        price_els = soup.find_all(class_=re.compile(r'price|Price', re.I), limit=10)
+        # Also look for text matching price patterns
+        price_text_els = [
+            el for el in soup.find_all(string=re.compile(r'[\$\£\€\₹][\d,\.]+|[\d,]+\.[\d]{2}'))
+            if el.parent
+        ][:8]
+        if price_els or price_text_els:
+            lines.append("PRICES:")
+            seen = set()
+            for el in price_els:
+                sel = _best_selector(el)
+                text = el.get_text(strip=True)[:40]
+                if text and sel not in seen:
+                    seen.add(sel)
+                    lines.append(f"  - selector: {sel}  text='{text}'")
+            for el in price_text_els:
+                parent = el.parent
+                sel = _best_selector(parent)
+                text = el.strip()[:40]
+                if sel not in seen:
+                    seen.add(sel)
+                    lines.append(f"  - selector: {sel}  text='{text}'")
+
+        # ── PRODUCT TITLES / KEY TEXT ────────────────────────
+        headings = soup.find_all(['h1', 'h2', 'h3'], limit=8)
+        if headings:
+            lines.append("HEADINGS:")
+            for el in headings:
+                text = el.get_text(strip=True)[:80]
+                if text:
+                    lines.append(f"  - <{el.name}> {text}")
+
+        # ── PRODUCT LINKS (first 6) ─────────────────────────
+        product_links = [
+            a for a in soup.find_all('a', href=True, limit=50)
+            if '/dp/' in a.get('href', '') or 'product' in a.get('href', '').lower()
+        ][:6]
+        if product_links:
+            lines.append("PRODUCT LINKS:")
+            for a in product_links:
+                href = a['href'][:80]
+                text = a.get_text(strip=True)[:60]
+                lines.append(f"  - href={href}  text='{text}'")
+
+        # ── DIALOGS / POPUPS ────────────────────────────────
+        dialogs = soup.find_all(attrs={'role': re.compile(r'dialog|alert|banner', re.I)}, limit=3)
+        if dialogs:
+            lines.append("POPUPS/DIALOGS:")
+            for d in dialogs:
+                sel = _best_selector(d)
+                text = d.get_text(strip=True)[:80]
+                lines.append(f"  - selector: {sel}  text='{text}'")
+
+        result = "\n".join(lines)
+        return result if result else "(no interactive elements found)"
+
+    except Exception as exc:
+        return f"(element extraction failed: {exc})"
+
+
+def _best_selector(el) -> str:
+    """Build the most specific CSS selector for a BeautifulSoup element."""
+    if el.get('id'):
+        return f"#{el['id']}"
+    if el.get('name'):
+        return f"{el.name}[name='{el['name']}']"
+    if el.get('aria-label'):
+        aria = el['aria-label'].replace("'", "")[:40]
+        return f"{el.name}[aria-label='{aria}']"
+    classes = el.get('class', [])
+    if isinstance(classes, list) and classes:
+        cls = ".".join(classes[:2])
+        return f"{el.name}.{cls}"
+    return el.name
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +248,7 @@ class PlaywrightEngine:
 
     def __init__(
         self,
-        headless: bool = True,
+        headless: bool = False,
         screenshots_dir: Optional[str] = None,
         slow_mo: int = 0,
     ):
@@ -185,7 +373,42 @@ class PlaywrightEngine:
     def _navigate(self, page, action: dict, variables: dict) -> ActionResult:
         url = self._substitute(action.get("url", ""), variables)
         page.goto(url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
+        # Auto-dismiss common overlay popups that block interaction
+        self._dismiss_popups(page)
         return ActionResult(success=True)
+
+    def _dismiss_popups(self, page) -> None:
+        """
+        Silently dismiss overlay popups/dialogs after page load.
+        Uses only generic ARIA roles and common patterns — no site-specific selectors.
+        Never raises — best-effort only.
+        """
+        # Generic selectors based on ARIA roles and common patterns
+        dismiss_selectors = [
+            # ARIA dialog close/dismiss buttons
+            "[role='dialog'] button[aria-label*='close' i]",
+            "[role='dialog'] button[aria-label*='dismiss' i]",
+            "[role='dialog'] button[aria-label*='accept' i]",
+            "[role='alertdialog'] button",
+            # Common cookie/consent banner patterns
+            "button[id*='accept' i]",
+            "button[id*='agree' i]",
+            "button[class*='dismiss' i]",
+            "button[class*='cookie-accept' i]",
+            "button[class*='consent-accept' i]",
+            # Close buttons via ARIA label (generic)
+            "[aria-label='Close']",
+            "[aria-label='Dismiss']",
+            "[aria-label='close' i]",
+        ]
+        for sel in dismiss_selectors:
+            try:
+                locator = page.locator(sel).first
+                if locator.is_visible(timeout=500):
+                    locator.click(timeout=500)
+                    page.wait_for_timeout(300)
+            except Exception:
+                continue
 
     def _click(self, page, action: dict, variables: dict) -> ActionResult:
         selector = self._substitute(action.get("selector", ""), variables)
@@ -415,9 +638,10 @@ class PlaywrightEngine:
 
     def get_page_context(self, page) -> PageContext:
         """
-        Capture current page state for use in AI recovery prompts.
+        Capture current page state.
 
-        Returns truncated HTML to stay within token budget.
+        - elements_map: structured BeautifulSoup extraction (primary LLM input)
+        - html_snippet: full cleaned HTML (fallback for recovery when element map isn't enough)
         """
         try:
             url = page.url
@@ -426,15 +650,22 @@ class PlaywrightEngine:
             url = "(unknown)"
             title = "(unknown)"
 
+        elements_map = ""
         html_snippet = ""
         try:
             full_html = page.content()
-            # Strip scripts and styles for token efficiency
-            clean = re.sub(r"<(script|style)[^>]*>.*?</\1>", "", full_html, flags=re.S | re.I)
-            clean = re.sub(r"<[^>]+>", " ", clean)
-            clean = re.sub(r"\s{2,}", " ", clean).strip()
-            html_snippet = clean[:HTML_SNIPPET_CHARS]
+            # Always build the structured element map first (token-efficient)
+            elements_map = extract_elements_map(full_html)
+            # Also build full cleaned HTML for fallback recovery context
+            html_snippet = clean_html_for_llm(full_html)
+            if len(html_snippet) > HTML_SNIPPET_CHARS:
+                html_snippet = html_snippet[:HTML_SNIPPET_CHARS] + "...[truncated]"
         except Exception:
             pass
 
-        return PageContext(url=url, title=title, html_snippet=html_snippet)
+        return PageContext(
+            url=url,
+            title=title,
+            html_snippet=html_snippet,
+            elements_map=elements_map,
+        )
