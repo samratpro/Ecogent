@@ -18,34 +18,35 @@ The core idea: **most agent tasks don't need a cloud LLM on every run.** A local
 
 ```mermaid
 flowchart TD
-    A["👤 User Input"] --> B["Supervisor<br>(Rule-based NLP)"]
+    classDef default fill:#ffffff,stroke:#34495e,stroke-width:1px,color:#2c3e50;
+    classDef user fill:#ebf5fb,stroke:#2980b9,stroke-width:1.5px,color:#2c3e50;
+    classDef local fill:#eafaf1,stroke:#27ae60,stroke-width:1.5px,color:#2c3e50;
+    classDef cloud fill:#fdedec,stroke:#c0392b,stroke-width:1.5px,color:#2c3e50;
+    classDef db fill:#f2f4f4,stroke:#7f8c8d,stroke-width:1.5px,color:#2c3e50;
+
+    A["👤 User Input"]:::user --> B["Supervisor<br>(Rule-based NLP)"]:::local
     B --> C{"Confidence<br>>= 0.60?"}
-    C -->|Yes| D["Chroma DB<br>Semantic Search"]
-    C -->|No| E["Tiny LLM<br>(SmolLM2-135M)"]
+    C -->|Yes| D["Chroma DB<br>Semantic Search"]:::db
+    C -->|No| E["Tiny LLM<br>(SmolLM2-135M)"]:::local
     E --> F{"Confidence<br>>= 0.65?"}
     F -->|Yes| D
-    F -->|No| G["☁️ Cloud LLM<br>via LangGraph ReAct"]
+    F -->|No| G["☁️ Cloud LLM<br>via LangGraph ReAct"]:::cloud
     D --> H{"Tool<br>Found?"}
-    H -->|Yes| I["Direct Tool Execution<br>(No ReAct Loop)"]
+    H -->|Yes| D2["NoSQL JSON DB<br>Fetch Payload"]:::db
+    D2 --> I["Direct Tool Execution<br>(No ReAct Loop)"]:::local
     H -->|No| G
-    I --> J["Deterministic<br>Verification"]
+    I --> J["Deterministic<br>Verification"]:::local
     J --> K{"Passed?"}
-    K -->|Yes| L["✅ Return Result<br>cloud_calls = 0"]
-    K -->|No| M["Tiny LLM<br>Semantic Verify"]
+    K -->|Yes| L["✅ Return Result<br>cloud_calls = 0"]:::local
+    K -->|No| M["Tiny LLM<br>Semantic Verify"]:::local
     K -->|Indeterminate| M
     M -->|Pass| L
-    M -->|Fail| R["❌ Return Failed<br>Local Result"]
-    G --> N["ReAct Agent Loop<br>(max 6 iterations)"]
-    N --> O["Tiny LLM<br>Post-Verification"]
-    O -->|Fail| P["Cloud Recovery"]
-    O -->|Pass| Q["✅ Return Result"]
+    M -->|Fail| R["❌ Return Failed<br>Local Result"]:::cloud
+    G --> N["ReAct Agent Loop<br>(max 6 iterations)"]:::cloud
+    N --> O["Tiny LLM<br>Post-Verification"]:::local
+    O -->|Fail| P["Cloud Recovery"]:::cloud
+    O -->|Pass| Q["✅ Return Result"]:::local
     P --> Q
-
-    style A fill:#4a90d9,color:white
-    style L fill:#27ae60,color:white
-    style Q fill:#27ae60,color:white
-    style R fill:#e74c3c,color:white
-    style G fill:#e74c3c,color:white
 ```
 
 ```
@@ -61,10 +62,10 @@ flowchart TD
               └────────────┬─────────────┘
                            │
            ┌───────────────▼────────────────┐
-           │   Semantic Memory (ChromaDB)    │
-           │  - Tool registry lookup         │
-           │  - Browser pattern lookup       │
-           │  - Session/project memory       │
+           │   Dual-Database Memory         │
+           │ 1. ChromaDB (Semantic Index)   │
+           │ 2. NoSQL DB (JSON Payload)     │
+           │  - Tool registry & patterns    │
            └───────┬───────────────┬────────┘
                    │               │
         ┌──────────▼──┐   ┌────────▼──────────────┐
@@ -115,10 +116,13 @@ Every task first goes through a **local NLP supervisor** — no cloud calls. It 
 > **🔜 Planned Feature (Dynamic Cloud Model Routing):**
 > Another local agent layer will be implemented later that evaluates the exact complexity of the task to decide **which** cloud model to use. For example, routing moderate tasks to a cheaper model (like Llama 3 8B) and saving the expensive models (like GPT-4o or Claude 3.5 Sonnet) only for highly complex tasks.
 
-### 2. Semantic Tool Registry (ChromaDB)
-All generated tools and saved browser patterns are stored as semantic embeddings in **ChromaDB**. When a similar task arrives:
-- Tools are retrieved by semantic similarity — no LLM needed
-- Browser patterns are retrieved by task fingerprint — direct pattern reuse
+### 2. Dual-Database Tool Registry (ChromaDB + NoSQL)
+To prevent memory bloat, Ecogent splits storage into an index and a payload database. All generated tools and saved browser patterns use this dual system:
+- **ChromaDB** stores only the lightweight semantic embeddings (the search index).
+- **NoSQL JSON DB (`db.py`)** stores the actual heavy JSON workflows and error logs.
+When a similar task arrives:
+- ChromaDB finds the semantic match — no LLM needed
+- The NoSQL DB fetches the exact pattern payload — direct pattern reuse
 - **Token cost = 0** for tasks the system has seen before
 
 ### 3. Browser Agent — Record & Replay
@@ -133,7 +137,7 @@ User Task → LLM plans Step 1 JSON
          → Element map sent back to LLM (not raw HTML)
          → LLM plans Step 2 using actual selectors
          → Repeat until task complete
-         → Save entire workflow as BrowserPattern JSON
+         → Save entire BrowserPattern JSON to NoSQL DB
 ```
 
 **Key insight:** Instead of dumping raw HTML to the LLM (expensive, noisy), BeautifulSoup extracts a structured **element map**:

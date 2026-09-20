@@ -24,7 +24,8 @@ flowchart TD
     F -->|Yes| D
     F -->|No| G["☁️ Cloud LLM<br>via LangGraph ReAct"]
     D --> H{"Tool<br>Found?"}
-    H -->|Yes| I["Direct Tool Execution<br>(No ReAct Loop)"]
+    H -->|Yes| D2["NoSQL JSON DB<br>Fetch Payload"]
+    D2 --> I["Direct Tool Execution<br>(No ReAct Loop)"]
     H -->|No| G
     I --> J["Deterministic<br>Verification"]
     J --> K{"Passed?"}

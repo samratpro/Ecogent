@@ -1,9 +1,9 @@
 \section{Introduction}
-This research introduces a new system that combines clear step-by-step planning, long-term memory, and multiple specialized agents working together. Unlike older models that rely completely on expensive cloud services, this new design focuses on doing as much work as possible locally on the user's machine. By handling most decisions and tasks locally, the system runs more smoothly, uses fewer tokens, and costs much less to operate.\\
+This research introduces a new system that combines clear step-by-step planning, long-term memory, and multiple specialized agents working together. Unlike older models that rely completely on expensive cloud services, this new design focuses on doing as much work as possible locally on the user's machine. By handling most decisions and tasks locally, the system runs more smoothly, uses fewer tokens, and costs much less to operate.
 
-To make this work, the system avoids messy, open-ended conversations. Instead, it uses a strict, organized method to complete tasks. At the heart of this system is a smart filtering process. When a user makes a request, the system first tries to understand and solve it using fast, local AI models. It only sends the request to large, expensive cloud models if the task requires deep thinking or complex problem-solving. This ensures that expensive cloud models are not wasted on simple tasks.\\
+To make this work, the system avoids messy, open-ended conversations. Instead, it uses a strict, organized method to complete tasks. At the heart of this system is a smart filtering process. When a user makes a request, the system first tries to understand and solve it using fast, local AI models. It only sends the request to large, expensive cloud models if the task requires deep thinking or complex problem-solving. This ensures that expensive cloud models are not wasted on simple tasks.
 
-Additionally, the system is designed to learn from experience. By using local databases, it saves a record of how it successfully completed past tasks, such as writing code or navigating websites. This creates a historical memory, allowing the agent to skip the planning phase when it encounters a similar problem again. As a result, the system becomes faster and more affordable over time as its local knowledge grows.\\
+Additionally, the system is designed to learn from experience. By using local databases, it saves a record of how it successfully completed past tasks, such as writing code or navigating websites. This creates a historical memory, allowing the agent to skip the planning phase when it encounters a similar problem again. As a result, the system becomes faster and more affordable over time as its local knowledge grows.
 
 \section{Key Agent Features}
 The proposed agent system includes the following main features:\\
@@ -24,7 +24,7 @@ The proposed agent system includes the following main features:\\
 \begin{figure}[H]
     \centering
     \vspace{-3cm}
-    \includegraphics[width=0.7\textwidth]{images/ecogent_workflow.png}
+    \includegraphics[width=0.63\textwidth]{images/ecogent_workflow.png}
     \caption{Ecogent Architecture Workflow.}
     \label{fig:ecogent_workflow}
 \end{figure}
@@ -35,7 +35,7 @@ If the task is simple or has been solved before, the supervisor matches it with 
 
 However, if the request is slightly more complicated and the supervisor cannot find a direct match, the system moves to the second step: the local Tiny LLM. This is a very small, lightweight AI model (for example, a 135-million parameter model) that runs directly on the local computer. It tries to understand the request and generate a solution without needing an internet connection. Because it is small, it runs very quickly and still costs nothing in terms of cloud API fees.\\
 
-Finally, if the user's request is highly complex and both local layers fail to solve it, the system reaches the third step. It escalates the problem to a powerful Cloud LLM, such as GPT-4 or Claude. This massive cloud model is given the difficult task to perform deep reasoning and create a detailed plan. By using this step-by-step filtering process, the system guarantees that expensive cloud models are only used when absolutely necessary. This smart routing drastically cuts down on operational costs while still providing top-tier AI performance for difficult problems.\\
+Finally, if the user's request is highly complex and both local layers fail to solve it, the system reaches the third step: cloud escalation. Rather than defaulting to the most expensive model every time, future implementations of Ecogent will use a dynamic difficulty score to route the task to either a low-cost, mid-cost, or high-cost Cloud LLM. For instance, a moderately difficult task might be sent to a cheaper cloud model, while only the most extremely difficult tasks are sent to massive models like GPT-4 or Claude. By using this step-by-step filtering process, the system guarantees that expensive cloud models are only used when absolutely necessary. This smart routing drastically cuts down on operational costs while still providing top-tier AI performance for difficult problems.\\
 
 \begin{figure}[H]
 \centering
@@ -120,15 +120,25 @@ To show the benefits of this new system, this section compares the local-first E
 
 
 
-\subsection{Semantic Memory (Chroma DB)}
-Instead of saving long, full chat conversations (which wastes tokens and drives up costs), the system creates short, meaningful tags for each task. 
+\subsection{Dual-Database Memory System (ChromaDB + NoSQL)}
+Instead of saving long, full chat conversations (which wastes API tokens and drives up cloud costs), the Ecogent system creates short, meaningful "memories" for each task it completes. Think of it like a human taking brief, organized notes instead of recording an entire three-hour meeting word-for-word. When the agent successfully finishes a job, it summarizes the key steps it took and saves them using short, simple tags. 
 
-\textbf{Example:}
+\textbf{Example Tags:}
 \begin{itemize}
     \item \texttt{login\_auth\_fix}
     \item \texttt{checkout\_payment\_error}
+    \item \texttt{extract\_invoice\_data}
 \end{itemize}
-These simple tags are saved in a local database called Chroma DB. By using this database to search for similar tags, the system can instantly find past solutions, old workflows, or specific tools. This prevents the AI from having to read through massive conversation histories every time.\\
+
+To keep the system lightweight and extremely fast, Ecogent uses a strictly separated, dual-database architecture:
+\begin{itemize}
+    \item \textbf{Chroma DB (Semantic Search):} A fast, local vector database \cite{chromadb_docs} that acts as the system's index. It stores only tiny semantic keys (embeddings) and minimal metadata. This guarantees zero memory bloat during searches.
+    \item \textbf{Local NoSQL JSON Database:} A standard, persistent database that stores the heavy data payloads. It permanently stores the massive JSON workflows, recorded browser patterns, full error logs, and complex file maps.
+\end{itemize}
+
+When a user asks the agent to do a new task, the local supervisor first asks Chroma DB, "Have we ever solved a problem like this before?" 
+
+If Chroma DB finds a matching semantic tag, it returns an ID. The system then queries the local NoSQL database to instantly retrieve the full, proven JSON steps from its past experience. It does not need to guess, and it does not need to ask the expensive cloud AI for a new plan. This dual-database "semantic memory" eliminates the need to read through massive conversation histories, saving an enormous amount of time and money while guaranteeing the system gets smarter without bloating the search index.\\
 
 \subsection{Multi-Agent System}
 To keep the system organized and prevent confusion, complex tasks are divided among specialized sub-agents:
@@ -152,7 +162,7 @@ To make sure this map stays accurate when files are changed by humans, the syste
 \subsection{Browser Agent Workflow Pattern System}
 The Browser Agent uses a special recording system to avoid using the cloud AI for repetitive web tasks. When asked to do something in the browser, the system first checks ChromaDB to see if it has done a similar task on that specific website before.\\
 
-If a matching record is found, the system simply replays the exact steps without calling the cloud AI, which costs nothing. If one of the steps fails during the replay, the AI steps in only to fix that specific mistake. If the system has never seen the task before, it carefully records its own actions step-by-step. It saves these actions as clear JSON files in ChromaDB so it can replay them for free in the future.\\
+If a matching record is found, the system simply replays the exact steps without calling the cloud AI, which costs nothing. If one of the steps fails during the replay, the AI steps in only to fix that specific mistake. If the system has never seen the task before, it carefully records its own actions step-by-step. It saves these detailed actions as clear JSON files in the NoSQL database, while saving the search tag in ChromaDB so it can replay them for free in the future.\\
 
 \subsection{OS Agent: Vector-Backed Stateful Execution}
 Older AI agents run simple computer commands that close instantly, causing the agent to forget its location and freezing the terminal during long tasks. The Ecogent OS Agent solves this by using continuous, state-aware execution. 
@@ -232,9 +242,9 @@ To make sure the tests are fair, the following standard datasets will be used:\\
     \item \textbf{Execution Speed:} Measuring exactly how long it takes to finish a task, testing if running processes locally in the background is faster than waiting for the cloud.
 \end{itemize}
 
-\subsection{Limitations and Risk Mitigation}
+\subsection{Expected Challenges}
 While the local-first approach provides significant benefits, it introduces specific challenges that must be addressed:\\
 \begin{itemize}
     \item \textbf{Tool Hallucination:} A primary risk is the Tiny LLM confidently hallucinating an incorrect tool. To mitigate this, the architecture relies heavily on the strict, rule-based NLP Supervisor as the first layer. Furthermore, the Testing Agent runs sandboxed validation checks before any destructive commands are executed.
-    \item \textbf{Memory Bloat in Local Storage:} Over time, saving every workflow pattern could cause the local ChromaDB to become bloated, slowing down search times. To prevent this, a background caching policy will automatically prune old, unused, or obsolete workflows, ensuring the database remains lightweight and fast.
+    \item \textbf{Semantic Overlap in Vector Search:} Because Ecogent efficiently separates the heavy JSON payloads into a NoSQL database and only stores semantic keys in ChromaDB, raw memory bloat is fully prevented. However, as hundreds of workflows are saved, similar tasks might develop overlapping semantic meanings, causing ChromaDB to return the wrong tool ID. To prevent this, strict metadata filtering (e.g., tagging domains like "Browser" vs "OS") is used to isolate searches, and the Tiny LLM acts as a secondary validator before execution.
 \end{itemize}

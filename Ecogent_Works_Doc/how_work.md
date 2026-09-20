@@ -1,6 +1,6 @@
 1. if user ask a request
 if chat is new:
- 1. direct community with LLM
+ 1. direct communicate with High cost LLM
  2. make plan.json (hold main task and sub tasks)
  3. then agent + local tiny llm will pass
     i. prebuild tools info
@@ -17,6 +17,12 @@ if chat is new:
 
 
 
+my research areas are:
+1. ChromaDB/vectordb for memory management and efficient context building without lossing/compressing contex (chromadb store sementic key and metadata but json workflow or info will have in JSON base or NOSQL db ) 
+2. Reuse previously done tasks if possible; for example, a browser agent can do it with keep navigate class ID and steps memorized; to achieve this, make some specialized agents that can efficiently handle specific tasks, e.g., coding, browser, os, test
+3. Reuse previously made or built-in tools while keeping tool data in a vector DB easily retrievable 
+4. Use a tiny LLM to handle tiny tasks; example: previous task matching, tool selection accuracy, specialized agent selection
+5. If the tiny LLM totally fails, future implement take diffculty score more tiny LLM and router - low cost, mid cost and high cost llm  (but tiny LLM is testing stage now)
 --------------------------------------------------------
 browser agentic task to reuse pattern:
 --------------------------------------------------------
@@ -31,3 +37,5 @@ this will do browser agent when a task base on browser
 --------------------------
 coding agent
 ----------------------
+
+GUI Automation - example pyautogui mentioned in last citetion

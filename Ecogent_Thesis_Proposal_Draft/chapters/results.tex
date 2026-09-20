@@ -1,5 +1,12 @@
 \section{Preliminary Results and Implementation Status}
-The Ecogent system proposed in this research offers a complete framework for AI automation that prioritizes local processing over the cloud. To prove that these ideas work, an initial prototype has been successfully built. The prototype's source code is publicly available and actively maintained at \url{https://github.com/samratpro/Ecogent}. This early version demonstrates the core routing system, the local memory, and specific web browser workflows. While the complete system (including all specialized agents mentioned in the methodology) will be built during the main research phase, this prototype proves that the local-first approach works and saves significant money.\\
+The Ecogent system proposed in this research offers a complete framework for AI automation that prioritizes local processing over the cloud. To prove that these ideas work, an initial prototype has been successfully built. This early version demonstrates the core routing system, the local memory, and specific web browser workflows. While the complete system (including all specialized agents mentioned in the methodology) will be built during the main research phase, this prototype proves that the local-first approach works and saves significant money.\\
+
+\subsection*{Code Availability}
+The prototype's source code is publicly available and actively maintained at\\ 
+\url{https://github.com/samratpro/Ecogent}.
+
+\subsection*{Scope and Hardware Assumptions}
+This research focuses specifically on a "local-first" architecture. To ensure the system is practical for everyday users, all local processing (including the NLP Supervisor, the Vector Database via ChromaDB, and the Tiny LLM) is designed to run on standard consumer hardware. The baseline assumption for "local execution" is a standard laptop with 8GB to 16GB of RAM and no dedicated GPU. By proving that advanced AI automation can run efficiently under these strict hardware constraints, the research highlights the true cost-saving potential of the Ecogent architecture.\\
 
 \subsection*{Current Prototype Capabilities}
 At this stage of development, the Ecogent prototype has reached its first major goals. It now has a fully working, local-first management pipeline.\\
@@ -25,12 +32,23 @@ At this stage of development, the Ecogent prototype has reached its first major 
 
 \textbf{Project Timeline (Pre-Defense Schedule):}
 To ensure the remaining components are systematically developed and tested, the following timeline is proposed:\\
-\begin{itemize}
-    \item \textbf{Phase 1 (Completed):} Prototype the core multi-tier routing system, NLP supervisor, and local memory (ChromaDB).
-    \item \textbf{Phase 2 (Upcoming):} Fully develop the Testing Agent and OS Agent to support token truncation and background processes.
-    \item \textbf{Phase 3 (Upcoming):} Implement the Coding Agent and its Semantic Code Map layer.
-    \item \textbf{Phase 4 (Final Evaluation):} Run rigorous benchmarking using SWE-bench and WebArena to finalize token and cost reduction metrics.
-\end{itemize}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{|l|l|l|p{0.45\textwidth}|}
+\hline
+\textbf{Phase} & \textbf{Status} & \textbf{Timeframe} & \textbf{Key Deliverables} \\
+\hline
+Phase 1 & Completed & Month 1 & Prototype the core multi-tier routing system, NLP supervisor, and local memory (ChromaDB). \\
+\hline
+Phase 2 & Upcoming & Month 2 & Fully develop the Testing Agent and OS Agent to support token truncation and background processes. \\
+\hline
+Phase 3 & Upcoming & Months 3--4 & Implement the Coding Agent and its Semantic Code Map layer. \\
+\hline
+Phase 4 & Final Eval. & Month 5 & Run rigorous benchmarking using SWE-bench and WebArena to finalize token and cost reduction metrics. \\
+\hline
+\end{tabular}
+\end{center}
 
 \section{Expected Outcomes}
 The expected results of this research are:\\

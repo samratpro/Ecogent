@@ -1,9 +1,7 @@
 \section{Introduction}
-In recent years, Large Language Models (LLMs) have evolved from simple chatbots into powerful autonomous agents. These modern AI agents can actively plan and complete complex tasks like writing software, managing files, and navigating websites. By using digital tools, these agents act as the ``hands'' of the AI model, allowing it to automate workflows much like a human professional would \cite{agent_survey}.\\
+In recent years, Large Language Models (LLMs) have evolved from simple chatbots into powerful autonomous agents. These modern AI agents can actively plan and complete complex tasks like writing software, managing files, and navigating websites. By using digital tools, these agents act as the ``hands'' of the AI model, allowing it to automate workflows much like a human professional would \cite{agent_survey}. However, despite their potential, current agent systems are very inefficient for everyday use. Today's popular agents lack proper control over how tasks are executed. Because these agents constantly send their entire, uncompressed chat history back and forth to the cloud for every single step, they consume a massive amount of API tokens. This quickly becomes very expensive to operate, especially for long or repetitive tasks.
 
-However, despite their potential, current agent systems are very inefficient for everyday use. Today's popular agents lack proper control over how tasks are executed. Because these agents constantly send their entire, uncompressed chat history back and forth to the cloud for every single step, they consume a massive amount of API tokens. This quickly becomes very expensive to operate, especially for long or repetitive tasks.\\
-
-Furthermore, relying entirely on the cloud makes these agents slow and fully dependent on a continuous internet connection. This poor architectural design makes it difficult for regular users and businesses to use traditional AI agents affordably. Therefore, there is an urgent need for a new type of agent architecture that is smart enough to handle complex tasks, but designed from the ground up to be highly efficient, cost-effective, and capable of running locally.\\
+This financial burden is a widespread problem across the technology industry. Across various professional sectors (such as software development, digital design, search engine optimization (SEO), data analysis, digital marketing, content creation, etc.), there is a strong desire to adopt AI agents for daily workflows. However, the extreme API token costs remain a major barrier to adoption. This issue is not limited to independent professionals or small businesses; recent reports indicate that even large corporations like Uber are now spending more money on AI token consumption than on the human employees the AI was meant to replace \cite{uber_ai_cost}. Furthermore, relying entirely on the cloud makes these agents slow and fully dependent on a continuous internet connection. This poor architectural design makes it difficult for regular users and businesses to use traditional AI agents affordably. Therefore, there is an urgent need for a new type of agent architecture that is smart enough to handle complex tasks, but designed from the ground up to be highly efficient, cost-effective, and capable of running locally.\\
 
 
 \section{Motivation}
@@ -33,6 +31,16 @@ The main objectives of this research are to overcome the limitations of current 
 \item \textbf{Optimize Skill and Tool Transmission:} Avoid passing lengthy text-based descriptions of Model Context Protocol (MCP) servers or external tools directly into the main prompt to save valuable token space.
 \end{itemize}
 
+\section{Core Research Areas}
+To achieve these objectives, this research focuses on five primary areas of innovation:\\
+\begin{enumerate}
+    \item \textbf{Smart Memory Management:} Utilizing a local vector database (Chroma DB) to efficiently build context and manage memory without losing important details or over-compressing data.
+    \item \textbf{Workflow Reuse via Specialized Agents:} Reusing past task workflows whenever possible. For example, a specialized Browser Agent can remember previous navigation steps to instantly repeat web tasks. This is achieved by dividing work among specialized agents (such as Coding, Browser, OS, and Testing agents).
+    \item \textbf{Persistent Tool Retrieval:} Storing pre-built and previously generated tools inside the vector database so they can be easily retrieved and reused, avoiding the need to generate new code from scratch.
+    \item \textbf{Tiny LLMs for Minor Tasks:} Using a very small, lightweight local AI model to handle basic jobs, such as matching past tasks, picking the right tools, and selecting the correct specialized agent.
+    \item \textbf{Dynamic Difficulty Routing:} Implementing a smart routing system that calculates a task's difficulty score. While the Tiny LLM is currently in the testing stage, future implementations will route tasks that fail locally to either a low-cost, mid-cost, or high-cost cloud model based on exactly how difficult the problem is.
+\end{enumerate}
+
 \section{Research Questions}
 This research aims to answer the following questions:\\
 \begin{enumerate}
@@ -41,6 +49,3 @@ This research aims to answer the following questions:\\
     \item \textbf{RQ3:} How much time and processing power is saved by reusing permanent, pre-made local tools instead of forcing the AI to write temporary new code for every task?
     \item \textbf{RQ4:} How accurately can a fast, local supervisor understand a user's request, pick the right tools, and assign the task without ever asking a cloud AI for help?
 \end{enumerate}
-
-\section{Scope and Hardware Assumptions}
-This research focuses specifically on a "local-first" architecture. To ensure the system is practical for everyday users, all local processing (including the NLP Supervisor, the Vector Database via ChromaDB, and the Tiny LLM) is designed to run on standard consumer hardware. The baseline assumption for "local execution" is a standard laptop with 8GB to 16GB of RAM and no dedicated GPU. By proving that advanced AI automation can run efficiently under these strict hardware constraints, the research highlights the true cost-saving potential of the Ecogent architecture.\\
