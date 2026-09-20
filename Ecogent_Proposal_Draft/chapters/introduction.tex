@@ -36,10 +36,10 @@ The main objectives of this research are to overcome the limitations of current 
 \section{Research Questions}
 This research aims to answer the following questions:\\
 \begin{enumerate}
-    \item \textbf{RQ1:} How much does a multi-tier local-first routing strategy (NLP supervisor $\rightarrow$ tiny model $\rightarrow$ cloud LLM) reduce cloud API token usage compared to single-tier cloud-native agent systems?
-    \item \textbf{RQ2:} Can structured JSON workflow representations combined with semantic memory (Chroma DB) effectively eliminate context bloat and reduce redundant reasoning in multi-agent systems?
-    \item \textbf{RQ3:} To what extent does persistent, pre-made tool reuse decrease operational cost and execution latency compared to ephemeral, LLM-generated scripts?
-    \item \textbf{RQ4:} How effectively can a local NLP and ML-based supervisor select appropriate tools and route tasks without invoking a cloud LLM?
+    \item \textbf{RQ1:} How many API tokens does a local-first routing system (local supervisor $\rightarrow$ tiny model $\rightarrow$ cloud) save compared to traditional cloud-only agents?
+    \item \textbf{RQ2:} Can using a local database (Chroma DB) and clear, step-by-step JSON plans prevent the AI from wasting memory and repeating the exact same work?
+    \item \textbf{RQ3:} How much time and processing power is saved by reusing permanent, pre-made local tools instead of forcing the AI to write temporary new code for every task?
+    \item \textbf{RQ4:} How accurately can a fast, local supervisor understand a user's request, pick the right tools, and assign the task without ever asking a cloud AI for help?
 \end{enumerate}
 
 \section{Scope and Hardware Assumptions}
