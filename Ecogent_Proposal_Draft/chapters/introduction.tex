@@ -1,0 +1,46 @@
+\section{Introduction}
+In recent years, artificial intelligence has experienced a massive shift. Large Language Models (LLMs) have grown from simple text generators and conversational chatbots into powerful autonomous agents. These modern AI agents do not just answer questions; they can actively plan and complete complex, multi-step tasks such as writing software, testing code, managing computer files, and navigating websites. By using specialized digital tools, these agents act as the ``hands'' of the AI model. This allows the AI to interact with real-world systems and automate workflows much like a human professional would \cite{agent_survey}.\\
+
+However, despite their incredible potential to change how businesses operate, current agent systems are very inefficient for everyday use. The transition from simple chatbots to autonomous agents has revealed major flaws in how these systems are built. Today's popular agents often require far too much computing power and lack proper control over how tasks are executed. Because these agents constantly send their entire, uncompressed chat history back and forth to the cloud for every single step of a task, they consume a massive amount of API tokens. This quickly becomes very expensive to operate, especially for long or repetitive tasks.\\
+
+Furthermore, relying entirely on the cloud means these agents are slow and fully dependent on a continuous internet connection. This poor architectural design makes it extremely difficult for regular users, small businesses, and researchers to use traditional AI agents affordably and securely. Therefore, there is an urgent need for a new type of agent architecture—one that is smart enough to handle complex tasks, but designed from the ground up to be highly efficient, cost-effective, and capable of running locally.\\
+
+
+\section{Motivation}
+Currently, most AI agents try to solve all types of problems without a clear, structured plan \cite{general_ai_agent1, general_ai_agent2}. This lack of organization causes major issues. Because these systems remember the entire conversation history instead of just the important details, they waste tokens. They also tend to repeat their work for similar tasks instead of reusing past solutions. Furthermore, they usually lack a local supervisor model to help guide their actions efficiently.\\
+
+From a system design perspective, this method is highly wasteful. Instead of saving long conversations, agents should only save the actual steps needed to solve a problem so they can reuse that knowledge later. Adding a local supervisor to manage the agent's tasks can greatly improve speed and reduce unnecessary cloud processing.\\
+
+This research is driven by a simple idea: AI agents should not try to remember everything; they should only remember what matters. Currently, many users waste AI credits and face high costs when using these assistants for daily tasks. By improving how agents manage their memory and adding a local supervisor, this research aims to provide a practical, cost-effective solution to these problems.\\
+
+\section{Problem Statement}
+Existing LLM-based agent systems face the following problems:\\
+\begin{itemize}
+\item \textbf{Unstructured Memory Usage:} Most agents store the full, uncompressed chat history during prolonged interactions. This approach rapidly consumes the available context window, significantly increases token costs, and introduces irrelevant noise that reduces the overall reasoning efficiency of the model\cite{ai_agent-memory}.
+\item \textbf{Lack of Workflow Representation:} Tasks are frequently executed in an ad-hoc manner without a structured planning mechanism. This lack of modular representation makes the execution process opaque, which complicates debugging, hinders error recovery, and makes systemic optimization highly difficult.
+\item \textbf{Inefficient Tool Selection:} Tools and external APIs are often selected through basic prompt-based guessing rather than a deep semantic understanding of the immediate requirement\cite{efficient_tool_select}. This blind selection process frequently leads to incorrect tool usage, execution failures, and repeated actions that waste computational resources.
+\item \textbf{Limited Knowledge Reuse:} Current architectures fail to effectively archive and retrieve previously successful workflows. Because historical execution patterns are not reused, the system is forced to solve identical problems from scratch, causing severe redundant computation and unnecessary delays.
+\item \textbf{Absence of a Local Supervisor:} The system relies entirely on the primary cloud-based LLM for both complex reasoning and basic task routing. Without a lightweight local intelligence supervisor to pre-process commands, the agent often makes unnecessary external API calls just to understand simple instructions, which heavily impacts both latency and financial cost.
+\end{itemize}
+
+\section{Research Objectives}
+The main objectives of this research are to overcome the limitations of current cloud-native systems (such as Claude Code and Google Antigravity)\cite{anthropic_claude_code_works, google_antigravity_ide} and to introduce better token economics \cite{token_economics, ai_tokenomics}:\\
+\begin{itemize}
+\item \textbf{Eliminate Massive Context Windows:} Remove the dependency on huge, uncompressed context windows by retaining only the most critical information, which aligns with the principles of marginal token allocation \cite{marginal_token}.
+\item \textbf{Avoid Repetitive Code Generation:} Stop generating unique and disposable code loops for every single task \cite{claude_code_dive}. Instead, the system will reuse persistent and pre-built local tools to save computational effort.
+\item \textbf{Maintain Structured JSON Roadmaps:} Move away from unstructured natural language planning. The goal is to generate deterministic JSON roadmaps that contain clear, step-by-step instructions for task execution.
+\item \textbf{Minimize Cloud Communication for Minor Tasks:} Reduce network bandwidth and runtime costs by handling small navigations, routine interactions, and previously solved tasks locally instead of calling the main LLM \cite{efficient_agents}.
+\item \textbf{Optimize Skill and Tool Transmission:} Avoid passing lengthy text-based descriptions of Model Context Protocol (MCP) servers or external tools directly into the main prompt to save valuable token space.
+\end{itemize}
+
+\section{Research Questions}
+This research aims to answer the following questions:\\
+\begin{enumerate}
+    \item \textbf{RQ1:} How much does a multi-tier local-first routing strategy (NLP supervisor $\rightarrow$ tiny model $\rightarrow$ cloud LLM) reduce cloud API token usage compared to single-tier cloud-native agent systems?
+    \item \textbf{RQ2:} Can structured JSON workflow representations combined with semantic memory (Chroma DB) effectively eliminate context bloat and reduce redundant reasoning in multi-agent systems?
+    \item \textbf{RQ3:} To what extent does persistent, pre-made tool reuse decrease operational cost and execution latency compared to ephemeral, LLM-generated scripts?
+    \item \textbf{RQ4:} How effectively can a local NLP and ML-based supervisor select appropriate tools and route tasks without invoking a cloud LLM?
+\end{enumerate}
+
+\section{Scope and Hardware Assumptions}
+This research focuses specifically on a "local-first" architecture. To ensure the system is practical for everyday users, all local processing—including the NLP Supervisor, the Vector Database (ChromaDB), and the Tiny LLM (e.g., a 135M parameter model)—is designed to run on standard consumer hardware. The baseline assumption for "local execution" is a standard laptop with 8GB to 16GB of RAM and no dedicated GPU. By proving that advanced AI automation can run efficiently under these strict hardware constraints, the research highlights the true cost-saving potential of the Ecogent architecture.\\

@@ -1,0 +1,101 @@
+\section{Introduction}
+Large language models (LLMs) have changed how artificial intelligence works. Initially, they were designed to simply answer questions in a single step. However, as tasks became more complicated, it was clear that bigger models were not enough. Today, research focuses on creating autonomous agents. These agents do not just generate text; they can plan, reason, and complete tasks step by step.\\
+
+A major part of this change is how agents plan their work. According to recent surveys \cite{agent_survey}, modern AI architectures break down complex problems into smaller, manageable sub-goals. This structured approach helps agents solve long-term tasks, fix their own mistakes, and adapt to new information much better than older systems.\\
+
+Furthermore, these agents must interact with external tools and real-world environments. For instance, AutoGPT+P \cite{autogpt_p} shows how agents can reliably use tools and APIs to complete their goals. By combining smart planning with the ability to use external resources, agents become highly practical for real-world applications.\\
+
+However, as these agents become more advanced, they face a major challenge: high operational costs. The constant cycle of reasoning and action consumes a huge amount of context window space, which drives up token usage and latency. Therefore, a key focus of current research is to build new frameworks that maintain high performance while significantly reducing these computational costs.\\
+
+\section{Context Windows}
+Many popular tools, such as LangChain, LangGraph, and LangSmith, help manage how AI agents execute tasks step by step \cite{langchain_langgraph}. However, most cloud-based systems today, including Claude Code \cite{claude_code_dive}, still send too much information to the AI all at once. They rely on massive context windows and generate temporary code for every single task. This approach makes the system slower and greatly increases the cost of running the agent.\\
+
+\section{Model Pricing}
+To solve the problem of high costs, several studies have looked closely at how agents use tokens and how large AI models are priced \cite{token_economics, ai_tokenomics}. These studies suggest that we should treat AI tokens as a limited and valuable resource \cite{marginal_token}. By carefully managing how tokens are used, developers can build fast, scalable agents while keeping the costs much lower for the user \cite{efficient_agents}.\\
+
+\section{Vector Databases}
+To make workflows run smoother, libraries like FLAML \cite{flaml} offer fast and lightweight tools to tune AI models. This can easily be added to systems designed to save money \cite{cost_aware_automl}. Additionally, for an agent to have good long-term memory, it needs a strong vector database. Studies comparing databases like Chroma, Qdrant, and FAISS \cite{chroma_faiss_analysis} show how important it is to choose the right local storage. A good database helps the agent find information quickly and prevents it from repeating expensive cloud requests.\\
+
+\section{Traditional Agent Architectures and ReAct}
+A basic design for many modern AI agents is the ReAct (Reasoning + Acting) model \cite{yao2023react}. In this model, the agent thinks about a problem, takes an action, and then checks the result. This back-and-forth process makes the agent more reliable than models that only think or only act. However, this method has a major flaw. As the agent takes more steps, the history of its actions grows very long. This causes the system to use more tokens, become slower, and cost more money, which is a big problem for long or complex tasks \cite{token_economics, efficient_agents}.\\
+
+\section{Traditional Tool Calling and Memory}
+Standard agents usually use tools in two steps: the AI picks a tool from a list, and then the system runs it and returns the result \cite{efficient_tool_select}. Although modern systems try to make this process organized \cite{langchain_langgraph}, they often handle memory poorly. Most agents just add the entire history of the conversation to their active memory. Even if they use a vector database to search for information, they still lack a good way to save project states. Instead, they rely on massive conversation histories that waste tokens and lower efficiency \cite{ai_agent-memory}.\\
+
+\section{Traditional Specialized Agents}
+To solve difficult problems, many systems break tasks down into specific roles, like Code Agents, Browser Agents, OS Agents, and Testing Agents. However, these specialized agents often have problems. Code agents, such as SWE-agent \cite{yang2024sweagent}, easily forget where files are. They have to search the whole system repeatedly, which wastes time and causes errors. Browser agents, such as BrowserGym \cite{chezelles2025browsergym}, have to constantly re-read web pages instead of remembering how they work. OS agents, such as OSWorld \cite{xie2024osworld}, often lose track of what they are doing between steps because they do not save their environment. Finally, testing agents often copy huge error logs directly into the AI, which uses up too many tokens and increases costs.\\
+
+\section{Research Gap}
+Despite recent improvements, today's popular AI agents still rely too much on expensive cloud services and struggle to be efficient. Specifically, there are four major gaps in current systems:\\
+
+\begin{itemize}
+    \item \textbf{No Long-Term Memory for Workflows:} Current agents easily forget how they solved a problem. They do not have a good way to instantly remember and reuse the right tools for tasks they have already finished.
+    \item \textbf{Repeating the Same Work:} Because agents do not save their step-by-step action plans, they waste time and money re-solving the exact same problems from scratch whenever a user asks a similar question.
+    \item \textbf{High Costs from Overusing Cloud AI:} Existing systems send almost every request directly to massive, expensive cloud models. There is a lack of systems that try to save money by solving simple problems locally first.
+    \item \textbf{Missing a Step-by-Step Filter (Triage):} Current agents do not have a strict filtering process. A major gap is the lack of a system that first tries to understand a request using fast, free local processing, then tries a small local AI model, and only pays for an expensive cloud AI as an absolute last resort.
+    \item \textbf{Impractical Fine-Tuning:} Many systems attempt to solve memory issues by fine-tuning local models. However, fine-tuning is expensive, static, and cannot dynamically learn new web paths or tool APIs on the fly. There is a need for experiential learning (using local databases) instead of constantly retraining neural networks.
+\end{itemize}
+
+This research aims to fix these problems by building the Ecogent architecture. By focusing on local processing, smart memory, and reusing past work, Ecogent provides a much more affordable and sustainable solution for the IT industry.\\
+
+
+
+
+\begin{table*}[htbp]
+\centering
+\caption{Comparison of Recent Cost- and Token-Efficient Agent Research}
+\label{tab:related_work_cost_efficient_agents}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{c p{5.6cm} p{5.8cm} p{5.2cm}}
+\hline
+\textbf{Ref.} & \textbf{Methodology} & \textbf{Result} & \textbf{Limitation} \\
+\hline
+
+\cite{token_economics} &
+Survey-based ``Token Economics'' framework covering single-agent, multi-agent, ecosystem, and security levels. It models tokens as resources and studies routing, communication, memory, tools, scheduling, and budget allocation.
+&
+Identifies token consumption and communication as major agent costs. It highlights routing, caching, memory optimization, communication reduction, and budget-aware reasoning as key ways to improve cost--quality efficiency.
+&
+No new system or unified benchmark. The reviewed studies use different models, metrics, and cost definitions, making direct comparison difficult.
+\\
+\hline
+
+\cite{ai_tokenomics}&
+Introduces AgentAssay for stochastic agent regression testing using SPRT, behavioral fingerprinting, coverage, mutation testing, metamorphic testing, adaptive budgets, and trace-first analysis. Evaluated on 5 models, 3 scenarios, and 7,605 trials.
+&
+Reports $5.3\times$ variation in token generation and $21\times$ latency variation. SPRT reduced trials by 78\%, fingerprinting reached 86\% detection power, and trace-first testing achieved 100\% cost saving when existing traces were available.
+&
+Only 5 models and 3 scenarios were tested. Results depend on statistical assumptions; long-horizon, physical-world, and broader multi-agent settings were not evaluated.
+\\
+\hline
+
+\cite{marginal_token} &
+Proposes marginal token allocation across four layers: model routing, agent actions, inference serving, and post-training. Allocation considers marginal benefit, token cost, latency, and risk.
+&
+Shows theoretically that simply minimizing tokens can cause over-routing, over-delegation, under-verification, serving congestion, stale rollouts, and cache misuse. Proposes a shared price signal for resource allocation.
+&
+No empirical validation. The framework assumes compute, latency, and risk can be combined into comparable costs and may not fit long-horizon tasks or non-convex, strategic environments.
+\\
+\hline
+
+\cite{efficient_agents} &
+Empirically studies LLM backbone, planning, tools, memory, and test-time scaling on the GAIA benchmark. Uses accuracy, token usage, monetary cost, and cost-of-pass to build a task-efficient agent configuration.
+&
+Efficient Agents retained 96.7\% of OWL's performance while reducing cost from \$0.398 to \$0.228 and improving cost-of-pass by 28.4\%. Results also show diminishing returns from extra planning and test-time samples.
+&
+Evaluation is mainly based on GAIA and selected configurations. Results may not generalize to long-horizon, domain-specific, or multi-agent production workloads.
+\\
+\hline
+
+\cite{cost_aware_automl} &
+Presents a cost-aware agent-based AutoML system using monitoring, generative reasoning, cost evaluation, and dynamic search pruning. It uses a utility function to balance performance and computational cost.
+&
+Evaluated on 75 datasets covering regression, classification, and time-series tasks. It achieved 25--50\% cost reduction on most datasets and over 60\% on some large datasets, while maintaining or improving performance over Auto-sklearn and H2O AutoML.
+&
+Focused on AutoML rather than general LLM agents. Results depend on the utility function and experimental environment, so generalization to other agent tasks is uncertain.
+\\
+\hline
+
+\end{tabular}%
+}
+\end{table*}

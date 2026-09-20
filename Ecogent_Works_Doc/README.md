@@ -2,8 +2,6 @@
 
 **A Local-First Multi-Agent Architecture for Reducing LLM Costs Through Persistent Tools, Semantic Memory, and Adaptive Model Routing**
 
-*This repository contains the prototype implementation for the Ecogent thesis research.*
-
 ---
 
 ## Overview
@@ -277,12 +275,11 @@ The agent routing architecture is designed to plug in new specialist agents:
 
 | Agent | Status | Description |
 |---|---|---|
-| `browser_agent` | ✅ Prototype Implemented | Web automation with record/replay |
-| `os_agent` | 🚧 Partially Implemented | File system, terminal, OS-level tasks |
-| `testing_agent` | 🚧 Partially Implemented | Token-optimized QA testing |
-| `code_agent` | 🔜 Upcoming | Code writing/debugging with Semantic Code Map (ChromaDB) |
-| `data_agent` | 🔜 Upcoming | CSV/Excel processing, data analysis |
-| `api_agent` | 🔜 Upcoming | REST API calls, webhook handling |
+| `browser_agent` | ✅ Implemented | Web automation with record/replay + self-healing |
+| `os_agent` | ✅ Implemented | File system, terminal, OS-level tasks |
+| `code_agent` | ✅ Implemented | Code writing/debugging with Semantic Code Map (ChromaDB) |
+| `data_agent` | 🔜 Planned | CSV/Excel processing, data analysis |
+| `api_agent` | 🔜 Planned | REST API calls, webhook handling |
 
 ---
 

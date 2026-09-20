@@ -1,0 +1,85 @@
+\documentclass[a4paper,12pt]{csekuthesis}
+\usepackage{times}
+\usepackage[left=3cm,right=3cm,top=3cm]{geometry}
+\usepackage{algpseudocode}
+\usepackage{algorithm}
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{float}
+\usepackage{caption,subcaption}
+\usepackage{multicol}
+\setcounter{secnumdepth}{2}
+
+\begin{document}
+\pagenumbering{roman}
+
+\input{chapters/title}
+\newpage
+
+\addcontentsline{toc}{chapter}{Title page}
+\input{chapters/2ndpage}
+
+
+\newpage
+\addcontentsline{toc}{chapter}{Clearance page}
+\input{chapters/clearance}
+
+\newpage
+\addcontentsline{toc}{chapter}{Submission page}
+\input{chapters/declaration}
+
+
+\newpage
+\addcontentsline{toc}{chapter}{Acknowledgment}
+
+ \chapter*{\centering Acknowledgment}
+\input{chapters/acknowledgment}
+
+\newpage
+\addcontentsline{toc}{chapter}{Dedication}
+\chapter*{\centering Dedication}
+\input{chapters/dedication}
+
+\newpage
+\addcontentsline{toc}{chapter}{Abstract}
+\chapter*{\centering Abstract}
+\input{chapters/abstract}
+
+\newpage
+\addcontentsline{toc}{chapter}{Table of Contents}
+\tableofcontents
+
+\newpage
+\addcontentsline{toc}{chapter}{List of Figures}
+\listoffigures
+
+\newpage
+\addcontentsline{toc}{chapter}{List of Tables}
+\listoftables
+
+\newpage
+\pagenumbering{arabic}
+\chapter[Background]{Background}
+\input{chapters/introduction}
+
+\chapter{Literature Review}
+\input{chapters/review}
+
+\chapter{Methodology} 
+\input{chapters/methodology}
+
+\chapter{Results and Analysis}
+\input{chapters/results}
+
+\chapter{Conclusion and Discussion}
+\input{chapters/conclusion}
+
+\bibliographystyle{ieeetr}
+
+\addcontentsline{toc}{chapter}{Bibliography}
+\bibliography{References}
+\end{document}
+
+
