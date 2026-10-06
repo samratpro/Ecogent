@@ -39,3 +39,55 @@ coding agent
 ----------------------
 
 GUI Automation - example pyautogui mentioned in last citetion
+
+
+
+## Manual:
+### Structure
+- Local supervisor
+- Tiny Local LLM
+- VectorDB(ChoromaDB)
+- NOSQL DB (JSON)
+- Main plan.json for each chat (Unique for each chat)
+- current_task.json (Unique for each chat)
+- chat.json for chat history (Unique for each chat)
+- prebuilt tools (for all chats)
+- project-made tools by LLM (unique for each project)
+- project_tools.json for tools history, manual, and location, and so on all(unique for each project)
+- cloud LLM(API base ollama, openrouter, openai)
+- multi-agent (Browser, Coding, Testing, OS task)
+- browser_task.json (Unique for each chat)
+- coding_task.json (Unique for each chat)
+- testing_task.json (Unique for each chat)
+- os_task.json (Unique for each chat)
+
+## How it works:
+Here is detail explain how Ecogent works:-
+
+### How to work for a new task/chat:
+- When task is new create initialized plan.json, current_task.json, chat.json, browser_task.json, coding_task.json, testing_task.json, os_task.json (Unique for each chat)
+- Need to send details on how Ecogent works to the LLM with a strong system prompt so that the LLM returns the structure of plan.json, current_task.json, chat.json, browser_task.json, coding_task.json, testing_task.json, os_task.json etc all for that specific project
+- Now the agent is clear about the task type and which Sub-Agent is main responsibilty to handle this task
+
+#### How to handle browser-based task
+- If the task is browser-based
+- Also, the agent has current_task.json to complete that task where has all steps
+- If the task is browser-based, then each task will have the following structure with browser automation:
+    i. steps = []  
+    ii. task_type = "browser"
+    iii. current_step = 1
+    iv. status = "pending"
+    v. sub_agents = ["browser"]
+    - When working browser_agent it will create that browser_task.json to record workflow
+    - browser_task.json should be unique based on the chat and the current prompt
+    - For example, the user said, " Please visit Amazon, search for iPhone, check price, compare with other site, and write report, here is that JSON workflow
+        {
+            "chat_id": "123456789",
+            "task_id": "123456789",
+            "task_type": "browser",
+            "steps": [],
+            "current_step": 1,
+            "status": "pending",
+            "sub_agents": ["browser"]
+        }
+   -

@@ -1,0 +1,87 @@
+
+
+
+=============================
+
+
+After the revolution of LLMs Large Language Models, the world has changed, but many people don't know that, behind the scenes, AI agents are working as LLMs' hands and legs  
+
+Bad things: A good, capable LLM can't run our computer, need cloud computing system or a host on a super computer.
+
+==================================
+BACKGROUND
+========================
+
+What is an AI agent?
+
+We can see here that a human is chilling out after loading all his pressure onto the AI agent
+
+Is it really true?
+Okay, Lemme share a personal experiment with an AI agent.
+
+========================================
+
+An Example of an AI agent solving a problem
+
+Personal Story:
+One of my familiar Facebook friends lives in Denmark now. Who knows I'm a Software developer. One day he said, " Hey Samrat, I'm in trouble starting next month; I need a new rental home, cause my master's has been completed.
+In Denmark, there is a popular home-rental site where homeowners post ads; good opputuanities apperment at afternoon when I am busy with my job duties. But ads only stay for 20-30 minutes due to a filled quota.
+
+Then, he said, " Do you have any solution for me?
+Then I just made an agentic system and hosted in Remote computer, and the good news is he got good houses in only 3 days.
+
+And 
+Is it possible to make a presentation slide with an AI agent like this?
+Yes, it's possible; I could, but I swear I didn't. hahaha
+
+
+======================================
+
+Examples of Some AI Agents and their Types
+
+Here are some example with type of specialized agents
+
+Coding Agents - 
+Autonomous Agents for server hosting- It can host on a server and can be commanded from your phone to do any task and check the status of your task
+Browser-based Agent - Can be used for software testing and research-based work
+General Agents in Personal PC - It can handle any kind of general-purpose task
+BlogAgent - I made BlogAgent for a client to solve his web blogging needs problem
+
+===================
+
+Let's see at a glance of BlogAgent Dashboard
+
+
+
+=======================================
+AI token and its concern:
+
+A token is a piece of words, including symbols, that a large Language model takes as input and output
+
+When we want to use an AI agent, token cost matters
+
+============
+Not only small business owners, marketers, developers, or designers; recently, Uber and NVIDIA, like these giant company thinking about AI Agent token cost cause they replace humans with AI coding, but they found it costs more than human replace
+
+
+
+====================================
+Literature Review: Industry Efforts
+========================================
+The industry is actively researching ways to improve AI performance and reduce model costs. However, current solutions, such as Model Distillation and RAG, still rely on stateless loops that do not give AI agents persistent “muscle memory.”
+
+I also found that most companies are currently focused on improving AI agent capabilities, reducing LLM model costs, and exploring new computing systems such as quantum computers. However, they still pay less attention to the overall cost of running AI agents.
+
+
+
+Proposed Methodology:
+========================
+Here is the Ecogent Architecture that I'm proposing to reduce token cost
+Ecogent proposing Specialized Multi-Agents to handle repetitive tasks, Local First- Supervisor reduce cloud costs and context building, and built-in tools to reduce tool calling 
+
+
+
+
+
+
+
