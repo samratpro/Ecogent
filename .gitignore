@@ -1,64 +1,24 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
 build/
-develop-eggs/
 dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
 *.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
 
-# Virtual Environment
+# Virtual environment
 .venv/
 venv/
-ENV/
 env/
-env.bak/
-venv.bak/
-slide.md
 
-# Ecogent Application Data
-data/
-projects/
-models/
-workflows/
-results/
-tools/generated/
-config/config.json
-config/model.json
+# Ecogent app data (chats, temp, output, browser profiles, settings with API keys)
+ecogent_data/
+
+# Drafts
+slide.md
 Ecogent_Thesis_Proposal_Draft.zip
-slide.md
-input.txt
 
-
-# IDEs
+# IDEs / OS
 .vscode/
 .idea/
-*.swp
-*.swo
-
-# OS Files
 .DS_Store
 Thumbs.db
-
-# Testing / Coverage
-.coverage
-htmlcov/
-.pytest_cache/
-test-results/
-playwright-report/
-blob-report/

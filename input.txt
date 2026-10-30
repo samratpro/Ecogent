@@ -1,5 +1,0 @@
-2  
-1  
-openai  
-search Bing for KKBAU and tell me the first result  
-exit  

@@ -1,369 +1,145 @@
 # Ecogent
 
-**A Local-First Multi-Agent Architecture for Reducing LLM Costs Through Persistent Tools, Semantic Memory, and Adaptive Model Routing**
+A token-efficient browser agent. The LLM plans, picks elements only when needed, heals
+failed steps and analyzes results; Python (Playwright + BeautifulSoup) does the work and
+remembers what worked in `plan.json`, so repeated runs need few or zero LLM tokens.
 
-*This repository contains the prototype implementation for the Ecogent thesis research.*
+Design: [Ecogent_Works_Doc/how_work.md](Ecogent_Works_Doc/how_work.md)
 
----
+## How to run
 
-## Overview
+### 1. Install (once)
 
-Ecogent is a research-grade experimental CLI prototype that validates whether a local-first multi-agent architecture can significantly reduce LLM API usage, token consumption, and execution overhead — while maintaining high task completion quality.
+Requires Python 3.10+ and a Chromium browser (Brave, Edge, Chrome, Comet or Chromium).
 
-The core idea: **most agent tasks don't need a cloud LLM on every run.** A local supervisor, semantic tool memory, structured workflow reuse, and a lightweight local model handle the majority of work. The cloud LLM is only called when truly needed — and when it is called, only efficient, filtered context is sent.
-
----
-
-## Architecture
-
-```mermaid
-flowchart TD
-    classDef default fill:#ffffff,stroke:#34495e,stroke-width:1px,color:#2c3e50;
-    classDef user fill:#ebf5fb,stroke:#2980b9,stroke-width:1.5px,color:#2c3e50;
-    classDef local fill:#eafaf1,stroke:#27ae60,stroke-width:1.5px,color:#2c3e50;
-    classDef cloud fill:#fdedec,stroke:#c0392b,stroke-width:1.5px,color:#2c3e50;
-    classDef db fill:#f2f4f4,stroke:#7f8c8d,stroke-width:1.5px,color:#2c3e50;
-
-    A["👤 User Input"]:::user --> B["Supervisor<br>(Rule-based NLP)"]:::local
-    B --> C{"Confidence<br>>= 0.60?"}
-    C -->|Yes| D["Chroma DB<br>Semantic Search"]:::db
-    C -->|No| E["Tiny LLM<br>(SmolLM2-135M)"]:::local
-    E --> F{"Confidence<br>>= 0.65?"}
-    F -->|Yes| D
-    F -->|No| G["☁️ Cloud LLM<br>via LangGraph ReAct"]:::cloud
-    D --> H{"Tool<br>Found?"}
-    H -->|Yes| D2["NoSQL JSON DB<br>Fetch Payload"]:::db
-    D2 --> I["Direct Tool Execution<br>(No ReAct Loop)"]:::local
-    H -->|No| G
-    I --> J["Deterministic<br>Verification"]:::local
-    J --> K{"Passed?"}
-    K -->|Yes| L["✅ Return Result<br>cloud_calls = 0"]:::local
-    K -->|No| M["Tiny LLM<br>Semantic Verify"]:::local
-    K -->|Indeterminate| M
-    M -->|Pass| L
-    M -->|Fail| R["❌ Return Failed<br>Local Result"]:::cloud
-    G --> N["ReAct Agent Loop<br>(max 6 iterations)"]:::cloud
-    N --> O["Tiny LLM<br>Post-Verification"]:::local
-    O -->|Fail| P["Cloud Recovery"]:::cloud
-    O -->|Pass| Q["✅ Return Result"]:::local
-    P --> Q
+**Windows (PowerShell)**
+```powershell
+cd "path\to\Ecogent"
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python -m playwright install chromium   # only needed if no Brave/Edge/Chrome is installed
 ```
 
-```
-┌─────────────────────────────────────────────────────┐
-│                    User Input (CLI)                  │
-└──────────────────────────┬──────────────────────────┘
-                           │
-              ┌────────────▼─────────────┐
-              │   Local NLP Supervisor    │
-              │  - Intent classification  │
-              │  - Complexity scoring     │
-              │  - Tool/agent routing     │
-              └────────────┬─────────────┘
-                           │
-           ┌───────────────▼────────────────┐
-           │   Dual-Database Memory         │
-           │ 1. ChromaDB (Semantic Index)   │
-           │ 2. NoSQL DB (JSON Payload)     │
-           │  - Tool registry & patterns    │
-           └───────┬───────────────┬────────┘
-                   │               │
-        ┌──────────▼──┐   ┌────────▼──────────────┐
-        │  Local Path │   │     Cloud Escalation   │
-        │             │   │  (OpenRouter/OpenAI/   │
-        │ Tiny LLM    │   │       Ollama)          │
-        │ (135M GGUF) │   └────────┬───────────────┘
-        │ + Tools     │            │
-        └──────┬──────┘            │
-               │                   │
-        ┌──────▼───────────────────▼──────┐
-        │         Agent Router            │
-        │  - os_agent (file/system tasks) │
-        │  - browser_agent (web tasks)    │
-        │  - [future: code_agent, etc.]   │
-        └──────┬──────────────────┬───────┘
-               │                  │
-   ┌───────────▼──────┐  ┌────────▼───────────────────────┐
-   │    OS / Local    │  │       Browser Agent             │
-   │    Executor      │  │  ┌──────────────────────────┐   │
-   │                  │  │  │  1. Fingerprint task      │   │
-   │  - Run tools     │  │  │  2. Lookup saved pattern  │   │
-   │  - Generate new  │  │  │     (ChromaDB)            │   │
-   │    tools via LLM │  │  │  3a. REPLAY: deterministic│   │
-   │  - Verify output │  │  │      Playwright execution  │   │
-   └──────────────────┘  │  │  3b. RECORD: LLM-guided   │   │
-                         │  │      step-by-step with     │   │
-                         │  │      BeautifulSoup DOM     │   │
-                         │  │      element extraction    │   │
-                         │  │  4. Self-heal on failure   │   │
-                         │  │  5. Save pattern for reuse │   │
-                         │  └──────────────────────────┘   │
-                         └────────────────────────────────┘
+**macOS / Linux**
+```bash
+cd path/to/Ecogent
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python -m playwright install chromium
 ```
 
----
+### 2. Start the desktop app
 
-## How It Works
-
-### 1. Local Supervisor (Zero LLM Cost)
-Every task first goes through a **local NLP supervisor** — no cloud calls. It handles three main tasks:
-
-- **Intent Classification:** It figures out *what kind* of task you're asking for. For example, it categorizes "visit Amazon and search baby products" as `browser_automation`, but "rename my report.csv file" as an `os_task`.
-- **Complexity Scoring:** It decides if a task is simple, moderate, or complex. Simple tasks might be routed to a tiny local model, while complex ones might need the cloud LLM.
-- **Agent Routing:** Based on the intent, it forwards the task to the correct specialized agent (e.g., the Browser Agent or the OS Agent) to actually do the work.
-- *Under the hood:* Uses TF-IDF + cosine similarity, requiring zero ML model inference for basic routing.
-
-> **🔜 Planned Feature (Dynamic Cloud Model Routing):**
-> Another local agent layer will be implemented later that evaluates the exact complexity of the task to decide **which** cloud model to use. For example, routing moderate tasks to a cheaper model (like Llama 3 8B) and saving the expensive models (like GPT-4o or Claude 3.5 Sonnet) only for highly complex tasks.
-
-### 2. Dual-Database Tool Registry (ChromaDB + NoSQL)
-To prevent memory bloat, Ecogent splits storage into an index and a payload database. All generated tools and saved browser patterns use this dual system:
-- **ChromaDB** stores only the lightweight semantic embeddings (the search index).
-- **NoSQL JSON DB (`db.py`)** stores the actual heavy JSON workflows and error logs.
-When a similar task arrives:
-- ChromaDB finds the semantic match — no LLM needed
-- The NoSQL DB fetches the exact pattern payload — direct pattern reuse
-- **Token cost = 0** for tasks the system has seen before
-
-### 3. Browser Agent — Record & Replay
-
-This is the most sophisticated part of Ecogent. Browser tasks go through a two-phase system:
-
-#### Phase A: Recording (First Run)
-```
-User Task → LLM plans Step 1 JSON
-         → Playwright executes step
-         → BeautifulSoup extracts real DOM elements
-         → Element map sent back to LLM (not raw HTML)
-         → LLM plans Step 2 using actual selectors
-         → Repeat until task complete
-         → Save entire BrowserPattern JSON to NoSQL DB
+```bash
+python -m ecogent
 ```
 
-**Key insight:** Instead of dumping raw HTML to the LLM (expensive, noisy), BeautifulSoup extracts a structured **element map**:
+(or `pip install -e .` once, then just `ecogent`)
+
+### 3. Set up the LLM (first start)
+
+Click **Settings**:
+
+- **Main LLM** - pick a provider; the base URL is filled in for you:
+
+  | Provider | Base URL | API key |
+  |---|---|---|
+  | OpenAI | `https://api.openai.com/v1` | required |
+  | OpenRouter | `https://openrouter.ai/api/v1` | required (one key, many models) |
+  | Ollama (local) | `http://localhost:11434/v1` | not needed |
+  | Custom OpenAI-compatible | your server, e.g. LM Studio `http://localhost:1234/v1`, Groq `https://api.groq.com/openai/v1`, vLLM / llama.cpp server | if the server needs one |
+  | Anthropic | `https://api.anthropic.com` | required |
+
+  Press **Test connection / fetch models**, then choose a model from the list (or type it).
+- **Tiny local LLM** (optional) - e.g. Ollama `qwen2.5:1.5b`; tick the jobs it should handle
+  (`pick`, `classify`, ...) so cheap calls stay local.
+- **General** - temp / output / browser-profile folders, browser path (empty = auto-detect),
+  headless or graphics mode by default.
+
+Settings are stored in `ecogent_data/settings.json` (git-ignored; it holds your API key).
+You can also set the key with the `ECOGENT_API_KEY` environment variable.
+
+### 4. Run a task
+
+1. Click **+ New task**, choose the type (Analysis, Data Scrap, Automation, Others, or
+   Auto-detect), optionally a browser profile and headless mode.
+2. Type the task in the chat and press **Enter**, e.g.
+   *"Search Google Scholar for papers on browser agents and give me a summarized md file"*.
+3. Watch the run: the LLM plan appears in the `plan.json` / `current_task.json` tabs, every step in
+   `steps.json`, and token usage at the bottom.
+4. When Ecogent needs you (captcha, login, confirming scraped sample data) a dialog appears -
+   do it in the browser window, then press **Continue**.
+5. Results are in **Data & output** (or **Output folder**). Send a follow-up in the same chat
+   ("same data as docx", "go deeper", "now the toys category") - Ecogent reuses the plan.
+6. **Run again** repeats the task with the cached plan (almost no tokens).
+
+**Automation tasks:** if the site needs a login, Ecogent opens a browser with a new profile -
+log in yourself and close the window; the session is reused on every run. It asks once for the
+info it should submit (editable later under **User info...**) and can run on a schedule
+(**Schedules**). Profiles can also be created up front in **Profiles**.
+
+### 5. Headless / from another program
+
+```bash
+python -m ecogent --type analysis "Search Google Scholar for browser agent papers and summarize to md"
+python -m ecogent --chat <chat_id> "now export it as docx"     # follow-up in an existing chat
 ```
-INPUTS:
-  - selector: #search-box  type=text  placeholder='Search...'
-BUTTONS:
-  - selector: button[aria-label='Search']  text='Search'
-PRICES:
-  - selector: span.price-amount  text='$29.99'
-HEADINGS:
-  - <h2> Product Title Here
-```
-The LLM uses **real selectors** from the live DOM — no guessing.
 
-#### Phase B: Replay (All Future Runs)
-```
-Same/Similar Task → ChromaDB finds saved pattern (distance ≈ 0)
-                 → Execute 7 steps deterministically via Playwright
-                 → No LLM calls needed
-                 → If a step fails → AI self-healing (one-shot recovery)
-```
+Prints a JSON result (chat id, status, output file, token usage). Other agents can call
+`ecogent.integration.run_tool_call(...)` with the `TOOL_SCHEMA` (task type + intent).
 
-**Cost model:**
-- First run: N cloud LLM calls (one per step)
-- Every future run: 0 LLM calls (unless self-healing needed)
+### Troubleshooting
 
-#### Self-Healing on Failure
-When replay fails (page changed, element moved, timeout), the agent:
-1. Captures the current page element map via BeautifulSoup
-2. Sends a **one-shot recovery context** to the LLM (just the failure + element map — not the full conversation history)
-3. Gets a corrected action
-4. Continues replay from that step
+- **"Port ... is in use"** - change *Debug port* in Settings or close the other browser instance.
+- **No browser found** - set *Browser executable* in Settings or run `python -m playwright install chromium`.
+- **LLM error** - check provider, base URL, model name and API key in Settings; the log panel shows the HTTP error.
 
-This keeps recovery token cost minimal — only the relevant page context is sent, never the accumulated conversation.
+## Task types
 
-### 4. Token Efficiency Design
-
-Several architectural decisions keep token usage low:
-
-| Problem | Solution |
+| Type | What happens |
 |---|---|
-| Raw HTML = huge token cost | BeautifulSoup extracts structured 20-line element map |
-| Context bloat on failures | Recovery uses one-shot context, not accumulated history |
-| API errors → infinite loops | Explicit `error` flag in provider responses, parse-fail circuit breaker |
-| Same task re-runs LLM | ChromaDB pattern reuse, 0 LLM calls on replay |
-| LLM outputs markdown/prose | System prompt enforces raw JSON only |
+| Analysis | Visit sources, save page text to the temp folder, LLM writes md/docx/json/csv/xlsx |
+| Data Scrap | LLM builds a CSS "programmatic pattern" once, sample is validated by LLM and you, then every page is scraped without LLM calls |
+| Automation | Log in once in a saved browser profile, provide your info, run on a schedule; handled items are never repeated |
+| Software Test | Not implemented yet |
+| Others | General browser task |
 
-### 5. Variable Extraction & Pattern Reuse
-Tasks with the same **intent** but different **parameters** reuse the same saved pattern:
+## Built-in tools
 
-```
-"show me the first product price"   → {nth: 1}  ─┐
-"show me the second product price"  → {nth: 2}  ──┼─ same pattern, different variable
-"what's the third item cost?"       → {nth: 3}  ─┘
-```
+The LLM plans with tools from a registry (`ecogent/toolbox.py`) and only sees the tools of the
+chat's task type.
 
-Ordinal words (first/second/third) are normalized to `{nth}` during fingerprinting. The actual value is extracted and passed as a runtime variable to the pattern.
+- **Browser:** open_url, fill, click, press, select_option, scroll, wait, screenshot, download,
+  upload, save_session
+- **Page data:** get_page_data, collect_links, extract_records
+- **Flow:** for_each, ask_user
+- **Local files:** list_files, read_file (txt/md/json/csv/xlsx/docx; `as_data` feeds the analysis),
+  write_file, append_file, copy_file, move_file, delete_file, make_dir, file_exists
+- **Results:** analyze, write_output
 
-### 6. Coding Agent — Semantic Code Map
-The Ecogent **Coding Agent** solves the "context bloat" problem of standard coding agents (which typically run expensive recursive searches across the entire repo for every prompt). 
-- **Active Memory:** When the agent writes code, it stores a tiny metadata JSON entry in ChromaDB mapping the component/feature to its exact file path and dependencies.
-- **Surgical Escalation:** When you ask to modify a feature later (e.g., "update the login button"), the local supervisor queries ChromaDB, retrieves the exact file path instantly, and sends **only** that specific file to the Cloud LLM.
-- **Sync Layer:** Solves cache invalidation through Active Sync (tools update DB automatically), Passive Sync (background OS watcher), and JIT Verification (checking if a file still exists before calling the cloud).
-- **Result:** Zero path hallucination, massive reduction in token cost, and instant code discovery.
+File tools work in the chat's **selected folder** (chat bar → **Folder...**), or in its output
+folder if none is selected. They can only touch the chat, temp, output and selected folders.
 
-### 7. OS Agent — Vector-Backed Stateful Execution
-The **OS Agent** replaces dangerous, stateless Python `exec()` calls with a robust, stateful subprocess layer backed by ChromaDB.
-- **Semantic System Map:** Critical system files (configs, build scripts) are registered in ChromaDB. If you ask to "edit the database config," the agent queries the Vector DB for the exact path instead of running a slow `ls` search.
-- **Persistent Terminals:** Runs commands in a stateful background terminal (`subprocess.Popen`). If the agent runs `cd backend`, the next command runs in the `backend` folder.
-- **Asynchronous Execution:** Long-running servers (like `npm run dev`) run in the background without freezing the CLI.
+## Files per chat (`ecogent_data/chats/<id>/`)
 
-### 8. Testing Agent — Token-Optimized QA
-The **Testing Agent** prevents the "token bloat" vulnerability that occurs when a test suite fails and dumps thousands of lines of logs into the LLM context.
-- **Semantic Test Discovery:** The agent queries ChromaDB for the exact test framework and file (e.g., `pytest tests/auth/test_login.py`) rather than hallucinating commands.
-- **Smart Paging & Truncation Layer:** If a test output exceeds 2,000 characters, the agent automatically truncates the middle of the log, returning only the Head (command run) and Tail (stack trace) to the Cloud LLM.
-- **Result:** Capped token usage and asynchronous background execution.
+- `plan.json` - goal, destination, output spec, execution memory (cached selectors, validation elements, scraping pattern), collected data, runs
+- `current_task.json` - steps the agent executes (editable in the app)
+- `steps.json` - execution log
+- `chat.json` - messages, memory summary, token usage
 
----
+## Code (`ecogent/`)
 
-## Project Structure
-
-```
-ecogent/
-├── ecogent_experiment/
-│   ├── cli.py                    # Interactive terminal (menu, chat, config)
-│   ├── supervisor.py             # Local NLP supervisor (intent + complexity)
-│   ├── router.py                 # Task → agent routing
-│   ├── agent.py                  # Main agent orchestrator
-│   ├── local_executor.py         # OS/file task execution
-│   ├── tool_registry.py          # ChromaDB tool registry + semantic search
-│   ├── tool_generator.py         # Cloud LLM generates new Python tools
-│   ├── workflow.py               # JSON workflow plan engine
-│   ├── db.py                     # Project/session database (JSON)
-│   ├── tiny_llm.py               # Tiny local LLM interface (135M GGUF)
-│   ├── inference.py              # llama.cpp GGUF inference engine
-│   ├── parser.py                 # JSON/text response parser
-│   ├── verifier.py               # Assertion-based output verification
-│   ├── token_counter.py          # Token usage tracking
-│   ├── metrics.py                # Research metrics
-│   ├── context.py                # Execution context manager
-│   ├── lc_tools.py               # LangChain tool wrappers
-│   │
-│   ├── browser_workflow/         # Browser Agent subsystem
-│   │   ├── manager.py            # Entry point: route to recorder or replayer
-│   │   ├── recorder.py           # First-run: LLM-guided step recording
-│   │   ├── replayer.py           # Replay saved patterns deterministically
-│   │   ├── playwright_engine.py  # Playwright wrapper + BeautifulSoup DOM parser
-│   │   ├── fingerprint.py        # Task → fingerprint + variable extraction
-│   │   ├── pattern_store.py      # Save/load BrowserPattern JSON + ChromaDB index
-│   │   └── schema.py             # Data models (BrowserStep, BrowserPattern, etc.)
-│   │
-│   ├── agents/                   # Specialized agent implementations
-│   └── providers/                # Cloud LLM providers
-│       ├── cloud.py              # OpenAI / OpenRouter / Ollama providers
-│       └── mock_cloud.py         # Mock provider for testing
-│
-├── tools/
-│   ├── builtin/                  # Permanent built-in tools (file, system, etc.)
-│   └── generated/                # Dynamically created tools (per project)
-│
-├── config/
-│   └── config.json               # Provider keys, model paths, thresholds
-│
-├── data/
-│   └── chroma/                   # ChromaDB persistent storage
-│
-├── projects/                     # Per-session project data + browser patterns
-├── models/                       # Local GGUF model files
-├── runtime/                      # llama.cpp binary
-├── results/                      # Benchmark and experiment results
-├── benchmark/                    # Benchmark task definitions
-└── tests/                        # Test suite
-```
-
----
-
-## Planned Agents (Roadmap)
-
-The agent routing architecture is designed to plug in new specialist agents:
-
-| Agent | Status | Description |
-|---|---|---|
-| `browser_agent` | ✅ Prototype Implemented | Web automation with record/replay |
-| `os_agent` | 🚧 Partially Implemented | File system, terminal, OS-level tasks |
-| `testing_agent` | 🚧 Partially Implemented | Token-optimized QA testing |
-| `code_agent` | 🔜 Upcoming | Code writing/debugging with Semantic Code Map (ChromaDB) |
-| `data_agent` | 🔜 Upcoming | CSV/Excel processing, data analysis |
-| `api_agent` | 🔜 Upcoming | REST API calls, webhook handling |
-
----
-
-## Quick Start
-
-### Prerequisites
-- Python 3.10+
-- Playwright browsers: `playwright install chromium`
-
-### Setup
-```bash
-python bootstrap.py
-```
-
-This will:
-- Create a `.venv` virtual environment
-- Install all dependencies (`playwright`, `beautifulsoup4`, `chromadb`, etc.)
-- Download the llama.cpp runtime and SmolLM2-135M-Instruct model
-- Initialize ChromaDB and register built-in tools
-
-### Configure Cloud LLM
-Edit `config/config.json`:
-```json
-"cloud_providers": {
-  "default": "openrouter",
-  "openrouter": {
-    "api_key": "sk-or-v1-...",
-    "model": "meta-llama/llama-3.1-70b-instruct"
-  },
-  "openai": {
-    "api_key": "sk-...",
-    "model": "gpt-4o"
-  },
-  "ollama": {
-    "api_key": "",
-    "model": "llama3",
-    "base_url": "http://localhost:11434"
-  }
-}
-```
-
-> **Note:** Use a model with strong JSON output capability. `meta-llama/llama-3.1-70b-instruct` on OpenRouter is recommended.
-
-### Usage
-```bash
-# Activate venv
-.venv\Scripts\activate         # Windows
-source .venv/bin/activate      # Linux/macOS
-
-# Start interactive agent terminal
-ecogent chat
-
-# Single inference
-ecogent infer --prompt "Rename report.csv to final.csv"
-
-# System info
-ecogent system-info
-
-# Inspect tools
-ecogent inspect-tool rename_file
-```
-
----
-
-## Target Hardware
-- 8 GB RAM laptop
-- CPU only (no GPU required)
-- No Ollama, LM Studio, or Docker needed for local mode
-
----
-
-## Research Hypothesis
-
-> *"Many agent tasks do not require an expensive cloud LLM call on every run. A local supervisor, persistent semantic tool memory, structured workflow reuse, DOM-aware browser automation, and a lightweight local model can handle a significant portion of agent tasks locally — reducing LLM-related cost while maintaining task completion quality."*
-
----
-
-## License
-
-MIT — Research prototype
+| Module | Role |
+|---|---|
+| `core.py` | New chat, first plan, follow-ups (rerun / heal / extend / reanalyze), automation requirements |
+| `executor.py` | Runs steps; cached selector -> probable elements -> broader area -> page outline; self-healing; hold for user |
+| `scraping.py`, `analysis.py` | Pattern scraping and final analysis |
+| `browser.py` | Wraps [playwright_browser_manager](https://github.com/samratpro/playwright_browser_manager) |
+| `page_reader.py` | BeautifulSoup candidates, cleaned page text, repeated blocks |
+| `llm.py`, `prompts.py` | Providers, main/local routing, token accounting, system prompts |
+| `memory.py` | ChromaDB lookup of similar earlier plans (reuses their selectors) |
+| `scheduler.py`, `worker.py`, `bridge.py` | Periodic runs, worker thread, agent <-> GUI requests |
+| `integration.py` | Tool-call entry point for other agents (task type + intent) |
+| `gui/` | DearPyGui app |
