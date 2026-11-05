@@ -180,13 +180,14 @@ def main_text(html: str, max_chars: int = 12000) -> tuple[str, str]:
     lines = [_norm(l) for l in root.get_text("\n").splitlines()]
     lines = [l for l in lines if len(l) > 2]
     counts = Counter(lines)
-    seen, kept = set(), []
+    kept: list[str] = []
     for l in lines:
-        if counts[l] > 3 and len(l) < 60:   # outlier: repeated short boilerplate
+        # Outlier: short boilerplate repeated on every card ("Add to cart"). Lines with digits are data
+        # (prices, ratings) and are kept even when two products share the same value.
+        if counts[l] > 3 and len(l) < 60 and not re.search(r"\d", l):
             continue
-        if l in seen:
+        if kept and kept[-1] == l:          # only adjacent duplicates are noise
             continue
-        seen.add(l)
         kept.append(l)
     return title, "\n".join(kept)[:max_chars]
 

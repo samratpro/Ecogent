@@ -23,6 +23,7 @@ from .config import NOT_IMPLEMENTED_TYPES, TASK_LABELS, TASK_TYPES, Settings
 from .executor import Executor, StepFailed, StopRequested
 from .llm import LLMError, LLMRouter
 from .memory import PlanMemory, compact_plan_reference
+from .scheduler import validate_rule
 from .storage import ChatSession, now_iso, open_session, slugify
 
 
@@ -279,9 +280,15 @@ class EcogentAgent:
 
     def _offer_schedule(self, s: ChatSession) -> None:
         sched = (s.plan.get("requirements") or {}).get("schedule")
-        if not sched or not self.on_schedule or s.meta.get("scheduled"):
+        if not isinstance(sched, dict) or not self.on_schedule or s.meta.get("scheduled"):
             return
-        rule = f"every {sched['every_minutes']} minutes" if sched.get("every_minutes") else f"daily at {sched.get('daily_at')}"
+        try:
+            minutes, daily = validate_rule(sched.get("every_minutes"), sched.get("daily_at") or "")
+        except ValueError as e:
+            self.ui.log(f"Schedule suggested by the planner ignored: {e}", s.id)
+            return
+        sched = {"every_minutes": minutes, "daily_at": daily}
+        rule = f"every {minutes} minutes" if minutes else f"daily at {daily}"
         if self.ui.confirm(s.id, f"Run this automation periodically ({rule})?"):
             self.on_schedule(s.id, sched)
             s.update_meta(scheduled=True)

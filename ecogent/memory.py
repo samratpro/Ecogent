@@ -70,6 +70,24 @@ class PlanMemory:
         return best
 
 
-def compact_plan_reference(plan: dict, steps: list) -> str:
+def _shorten(value, limit: int):
+    if isinstance(value, str):
+        return value if len(value) <= limit else value[: limit - 3] + "..."
+    if isinstance(value, list):
+        return [_shorten(v, limit) for v in value]
+    if isinstance(value, dict):
+        return {k: _shorten(v, limit) for k, v in value.items()}
+    return value
+
+
+def compact_plan_reference(plan: dict, steps: list, max_chars: int = 6000) -> str:
+    """Plan + every step as VALID JSON. Long texts are shortened; steps are never dropped,
+    because the LLM rewrites the full step list from this view."""
     keep = {k: plan.get(k) for k in ("goal", "destination", "output", "scrape", "requirements") if plan.get(k)}
-    return json.dumps({"plan": keep, "current_task": steps}, ensure_ascii=False)[:6000]
+    data = {"plan": keep, "current_task": steps}
+    text = json.dumps(data, ensure_ascii=False)
+    for limit in (300, 160, 80):
+        if len(text) <= max_chars:
+            break
+        text = json.dumps(_shorten(data, limit), ensure_ascii=False)
+    return text

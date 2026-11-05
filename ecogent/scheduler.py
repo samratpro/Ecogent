@@ -5,12 +5,32 @@ Due runs are handed to the worker queue, so they never overlap with other work.
 
 from __future__ import annotations
 
+import re
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
 from .storage import read_json, write_json
+
+
+_HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+
+
+def validate_rule(every_minutes=None, daily_at: str = "") -> tuple[Optional[int], Optional[str]]:
+    """Normalized (every_minutes, daily_at); raises ValueError for anything unusable."""
+    if every_minutes not in (None, "", 0):
+        try:
+            minutes = int(every_minutes)
+        except (TypeError, ValueError):
+            raise ValueError(f"every_minutes must be a number, got {every_minutes!r}") from None
+        if minutes < 1:
+            raise ValueError("every_minutes must be at least 1")
+        return minutes, None
+    m = _HHMM.match(str(daily_at or "").strip())
+    if not m:
+        raise ValueError(f"daily time must be HH:MM (00:00-23:59), got {daily_at!r}")
+    return None, f"{int(m.group(1)):02d}:{m.group(2)}"
 
 
 def next_run(entry: dict, after: Optional[datetime] = None) -> str:
@@ -45,10 +65,11 @@ class Scheduler(threading.Thread):
         write_json(self.path, entries)
 
     def add(self, chat_id: str, title: str, every_minutes: Optional[int] = None, daily_at: str = "") -> None:
+        every_minutes, daily_at = validate_rule(every_minutes, daily_at)
         with self._lock:
             entries = [e for e in self.entries() if e["chat_id"] != chat_id]
-            entry = {"chat_id": chat_id, "title": title, "every_minutes": every_minutes or None,
-                     "daily_at": daily_at or None, "enabled": True, "last_run": None}
+            entry = {"chat_id": chat_id, "title": title, "every_minutes": every_minutes,
+                     "daily_at": daily_at, "enabled": True, "last_run": None}
             entry["next_run"] = next_run(entry)
             entries.append(entry)
             self._save(entries)
@@ -77,12 +98,18 @@ class Scheduler(threading.Thread):
             with self._lock:
                 entries = self.entries()
                 now = datetime.now()
+                changed = False
                 for e in entries:
-                    if e.get("enabled", True) and e.get("next_run") and datetime.fromisoformat(e["next_run"]) <= now:
-                        e["last_run"] = now.isoformat(timespec="seconds")
-                        e["next_run"] = next_run(e, now)
-                        due.append(e["chat_id"])
-                if due:
+                    try:
+                        if e.get("enabled", True) and e.get("next_run") and datetime.fromisoformat(e["next_run"]) <= now:
+                            e["last_run"] = now.isoformat(timespec="seconds")
+                            e["next_run"] = next_run(e, now)
+                            due.append(e["chat_id"])
+                            changed = True
+                    except (ValueError, TypeError, KeyError):
+                        e["enabled"] = False      # broken entry: disable it, keep the scheduler running
+                        changed = True
+                if changed:
                     self._save(entries)
             for chat_id in due:
                 self.on_due(chat_id)

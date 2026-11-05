@@ -13,6 +13,7 @@ import dearpygui.dearpygui as dpg
 
 from ..config import LLM_PURPOSES, PROVIDERS, TASK_LABELS, TASK_TYPES, LLMConfig, Settings
 from ..llm import LLMClient
+from . import style as st
 from .style import DANGER, SUCCESS
 from ..scheduler import describe
 
@@ -66,6 +67,7 @@ class Dialog:
         # modal in the same frame another modal closed, so back-to-back dialogs would vanish.
         dpg.add_window(label=title, tag=self.tag, modal=modal, width=width, height=height, show=False,
                        pos=_pos(width, height), no_collapse=True, on_close=self._closed)
+        dpg.bind_item_theme(self.tag, "dialog")
         _PENDING.append([self.tag, 2])
 
     def _closed(self, *_):
@@ -83,7 +85,9 @@ class Dialog:
         self._closed()
 
     def row_buttons(self, ok_label: str, ok_cb, cancel_label: str = "Cancel") -> None:
-        dpg.add_spacer(height=6, parent=self.tag)
+        dpg.add_spacer(height=2, parent=self.tag)
+        dpg.add_separator(parent=self.tag)
+        dpg.add_spacer(height=2, parent=self.tag)
         with dpg.group(horizontal=True, parent=self.tag):
             dpg.bind_item_theme(dpg.add_button(label=ok_label, callback=ok_cb, width=170), "btn_primary")
             if cancel_label:
@@ -92,27 +96,61 @@ class Dialog:
 
 # =========================================================================== new task
 class NewTaskDialog(Dialog):
-    def __init__(self, settings: Settings, profiles: list[str], prompt: str, on_create: Callable[[dict], None]):
-        super().__init__("New task", 800, 660)
+    TYPE_INFO = {
+        "analysis": ("chart", "Read pages or files, summarize"),
+        "scraping": ("list", "Collect records, export a table"),
+        "automation": ("bolt", "Log in, fill forms, click flows"),
+        "software_test": ("test", "Coming soon"),
+        "others": ("doc", "Anything else in a browser"),
+        "auto": ("spark", "Detect it from the prompt"),
+    }
+    CARD_W, CARD_H = 252, 78
+
+    def __init__(self, settings: Settings, profiles: list[str], prompt: str, on_create: Callable[[dict], None],
+                 task_type: str = ""):
+        super().__init__("New task", 830, 760)
         self.on_create = on_create
-        self.labels = [TASK_LABELS[t] for t in TASK_TYPES] + ["Auto-detect"]
+        types = TASK_TYPES + ["auto"]
+        self.ttype = task_type if task_type in types else ("auto" if prompt else TASK_TYPES[0])
+        self.cards: dict[str, int] = {}
         p = self.tag
-        dpg.add_text("What type of task is this?", parent=p)
-        self.type_w = dpg.add_radio_button(self.labels, default_value=self.labels[0], horizontal=True, parent=p)
-        dpg.add_spacer(height=4, parent=p)
-        self.title_w = dpg.add_input_text(label="Title (optional)", width=380, parent=p)
-        self.profile_w = dpg.add_combo(["(temporary profile)"] + profiles, default_value="(temporary profile)",
-                                       label="Browser profile", width=380, parent=p)
+        dpg.add_text("Pick what Ecogent should do. The plan is made once and reused on every rerun.",
+                     color=MUTED, parent=p)
+        st.section_label("Task type", parent=p)
+        for i in range(0, len(types), 3):
+            with dpg.group(horizontal=True, horizontal_spacing=12, parent=p) as row:
+                for t in types[i:i + 3]:
+                    ic, desc = self.TYPE_INFO.get(t, ("doc", ""))
+                    card, btn = st.rich_button(row, self.CARD_H, "type_card", width=self.CARD_W,
+                                               callback=self._pick, user_data=t)
+                    st.put_icon(card, ic, 16, 16, color=st.PRIMARY_HOVER, size="icon")
+                    st.put_text(card, "Auto-detect" if t == "auto" else TASK_LABELS[t], 48, 10, "semibold")
+                    st.put_text(card, desc, 48, 40, "small", color=MUTED)
+                    self.cards[t] = btn
+        self._pick(None, None, self.ttype)
+        dpg.add_spacer(height=2, parent=p)
+        with dpg.group(horizontal=True, horizontal_spacing=16, parent=p):
+            with dpg.group():
+                st.section_label("Title (optional)")
+                self.title_w = dpg.add_input_text(width=380, hint="e.g. Baby products under $50")
+            with dpg.group():
+                st.section_label("Browser profile")
+                self.profile_w = dpg.add_combo(["(temporary profile)"] + profiles, default_value="(temporary profile)",
+                                               width=-1)
         self.headless_w = dpg.add_checkbox(label="Headless (no browser window)", default_value=settings.headless, parent=p)
-        dpg.add_text("Task prompt (optional - you can also type it in the chat):", parent=p)
-        self.prompt_w = dpg.add_input_text(multiline=True, default_value=prompt, width=-1, height=170, parent=p)
+        st.section_label("Task prompt (optional - you can also type it in the chat)", parent=p)
+        self.prompt_w = dpg.add_input_text(multiline=True, default_value=prompt, width=-1, height=120, parent=p)
         self.msg_w = dpg.add_text("", color=WARN, parent=p)
-        self.row_buttons("Create", self.ok)
+        self.row_buttons("Create task", self.ok)
+
+    def _pick(self, sender, app_data, ttype):
+        self.ttype = ttype
+        for t, btn in self.cards.items():
+            dpg.bind_item_theme(btn, "type_card_active" if t == ttype else "type_card")
 
     def ok(self, *_):
         prompt = dpg.get_value(self.prompt_w).strip()
-        label = dpg.get_value(self.type_w)
-        ttype = "auto" if label == self.labels[-1] else TASK_TYPES[self.labels.index(label)]
+        ttype = self.ttype
         if ttype == "auto" and not prompt:
             dpg.set_value(self.msg_w, "Write the task prompt so Ecogent can detect the type.")
             return
@@ -127,7 +165,7 @@ class NewTaskDialog(Dialog):
 # =========================================================================== settings
 class SettingsDialog(Dialog):
     def __init__(self, settings: Settings, on_save: Callable[[Settings], None]):
-        super().__init__("Settings", 900, 780)
+        super().__init__("Settings", 900, 830)
         self.settings, self.on_save = settings, on_save
         self.w: dict[str, int] = {}
         with dpg.tab_bar(parent=self.tag) as self.tabs:
@@ -462,12 +500,15 @@ class SchedulesDialog(Dialog):
             dpg.set_value(self.msg, "Select a chat first.")
             return
         rule = dpg.get_value(self.rule).strip()
-        if ":" in rule:
-            self.scheduler.add(self.current_chat[0], self.current_chat[1], daily_at=rule)
-        elif rule.isdigit():
-            self.scheduler.add(self.current_chat[0], self.current_chat[1], every_minutes=int(rule))
-        else:
-            dpg.set_value(self.msg, "Use a number of minutes or HH:MM.")
+        try:
+            if ":" in rule:
+                self.scheduler.add(self.current_chat[0], self.current_chat[1], daily_at=rule)
+            elif rule.isdigit():
+                self.scheduler.add(self.current_chat[0], self.current_chat[1], every_minutes=int(rule))
+            else:
+                raise ValueError("use a number of minutes or HH:MM")
+        except ValueError as e:
+            dpg.set_value(self.msg, f"Invalid schedule: {e}")
             return
         dpg.set_value(self.msg, "")
         self.refresh()

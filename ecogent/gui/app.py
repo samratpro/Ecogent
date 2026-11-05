@@ -1,19 +1,24 @@
 """
-Ecogent desktop GUI (DearPyGui) - modern web-dashboard style.
+Ecogent desktop GUI (DearPyGui) - modern web-app layout.
 
-Header: brand, status pill, run controls. Sidebar: new task, search, task cards, token stats.
-Main card: chat bubbles + composer, plan.json / current_task.json / steps.json / chat.json,
-files. Bottom card: activity log.
+Sidebar: brand, new task, search, task cards (status dot, type, age), navigation.
+Top bar: task title, type pill, status pill, Run again / Stop, activity-panel toggle.
+Main card: welcome screen with task ideas, or chat (avatars, bubbles, composer) plus
+plan.json / current_task.json / steps.json / chat.json and files tabs.
+Inspector (right): token usage tiles + timestamped activity log.
 All agent work runs on the Worker thread; the render loop only reacts to UIEvents.
 """
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import queue
 import subprocess
 import sys
+import traceback
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -30,7 +35,12 @@ from . import style as st
 JSON_TABS = [("plan", "plan.json", "Plan", True), ("task", "current_task.json", "Current task", True),
              ("steps", "steps.json", "Steps", False), ("memory", "chat.json", "Memory", False)]
 MAX_LOG_LINES = 400
-BUBBLE_INDENT = 140
+SIDEBAR_W = 280
+INSPECTOR_W = 340
+TOPBAR_H = 64
+COMPOSER_H = 112
+GAP = 12
+WELCOME_CARD_W = 360
 
 
 def open_path(path: Path) -> None:
@@ -43,6 +53,19 @@ def open_path(path: Path) -> None:
         subprocess.Popen(["open", str(path)])
     else:
         subprocess.Popen(["xdg-open", str(path)])
+
+
+def _ago(iso: str) -> str:
+    try:
+        sec = (datetime.now() - datetime.fromisoformat(iso)).total_seconds()
+    except (TypeError, ValueError):
+        return ""
+    if sec < 60:
+        return "just now"
+    for limit, div, unit in ((3600, 60, "m"), (86400, 3600, "h"), (7 * 86400, 86400, "d")):
+        if sec < limit:
+            return f"{int(sec // div)}{unit} ago"
+    return datetime.fromisoformat(iso).strftime("%b %d")
 
 
 def _human_size(n: int) -> str:
@@ -93,93 +116,116 @@ class EcogentApp:
         self.json_path: dict[str, Optional[Path]] = {key: None for key, *_ in JSON_TABS}
         self._scroll_chat = 0
         self._scroll_log = 0
+        self._welcome_indent: tuple = ()
+        self._welcome_cards: list[int] = []
 
     # ------------------------------------------------------------------ layout
     def _build(self) -> None:
         with dpg.window(tag="main", no_scrollbar=True):
-            self._build_header()
-            with dpg.group(horizontal=True):
+            with dpg.group(horizontal=True, horizontal_spacing=GAP):
                 self._build_sidebar()
                 with dpg.group():
-                    with dpg.child_window(tag="main_card", height=-196, border=True):
-                        dpg.bind_item_theme(dpg.last_item(), "card")
-                        with dpg.tab_bar():
-                            with dpg.tab(label="  Chat  "):
-                                self._build_chat()
-                            for key, filename, label, editable in JSON_TABS:
-                                with dpg.tab(label=f"  {label}  "):
-                                    self._build_json_tab(key, filename, editable)
-                            with dpg.tab(label="  Files  "):
-                                with dpg.group(horizontal=True):
-                                    dpg.bind_item_theme(dpg.add_button(label="Refresh", callback=self._load_files), "btn_secondary")
-                                    dpg.bind_item_theme(dpg.add_button(label="Open output folder", callback=self.open_output), "btn_ghost")
-                                dpg.add_child_window(tag="files_list", border=False)
-                                dpg.bind_item_theme(dpg.last_item(), "flat")
-                    with dpg.child_window(height=-1, border=True):
-                        dpg.bind_item_theme(dpg.last_item(), "card")
-                        with dpg.group(horizontal=True):
-                            st.section_label("Activity")
-                            st.font(dpg.add_text("browser, LLM and step events", color=st.FAINT), "small")
-                        dpg.add_child_window(tag="log_view", height=-1, border=False)
-                        dpg.bind_item_theme(dpg.last_item(), "flat")
-
-    def _build_header(self) -> None:
-        with dpg.child_window(tag="header_bar", height=70, border=True, no_scrollbar=True):
-            dpg.bind_item_theme(dpg.last_item(), "header")
-            with dpg.group(horizontal=True):
-                logo = dpg.add_button(label="E", width=38, height=38)
-                dpg.bind_item_theme(logo, "btn_primary")
-                st.font(logo, "h2")
-                with dpg.group():
-                    st.font(dpg.add_text("Ecogent"), "title")
-            with dpg.group(tag="header_sub", horizontal=True):
-                st.font(dpg.add_text("token-efficient browser agent", color=st.FAINT), "small")
-            with dpg.group(tag="header_right", horizontal=True):
-                dpg.add_loading_indicator(tag="spinner", style=1, radius=1.3, show=False,
-                                          color=st.PRIMARY_HOVER, secondary_color=st.SURFACE_2)
-                dpg.add_button(tag="status", label="Ready")
-                dpg.bind_item_theme("status", "pill_ok")
-                dpg.add_spacer(width=6)
-                dpg.bind_item_theme(dpg.add_button(label="Run again", callback=self.run_again), "btn_secondary")
-                dpg.bind_item_theme(dpg.add_button(tag="stop_btn", label="Stop", callback=self.stop, enabled=False), "btn_danger")
-                dpg.add_spacer(width=6)
-                for label, cb in (("Profiles", self.open_profiles), ("Schedules", self.open_schedules),
-                                  ("Output", self.open_output), ("Settings", self.open_settings)):
-                    dpg.bind_item_theme(dpg.add_button(label=label, callback=cb), "btn_ghost")
+                    self._build_topbar()
+                    with dpg.group(horizontal=True, horizontal_spacing=GAP):
+                        with dpg.child_window(tag="main_card", width=-(INSPECTOR_W + GAP), height=-1, border=True):
+                            dpg.bind_item_theme(dpg.last_item(), "card")
+                            with dpg.tab_bar():
+                                with dpg.tab(label=" Chat "):
+                                    self._build_chat()
+                                for key, filename, label, editable in JSON_TABS:
+                                    with dpg.tab(label=f" {label} "):
+                                        self._build_json_tab(key, filename, editable)
+                                with dpg.tab(label=" Files "):
+                                    with dpg.group(horizontal=True):
+                                        dpg.bind_item_theme(dpg.add_button(label="Refresh", callback=self._load_files), "btn_secondary")
+                                        dpg.bind_item_theme(dpg.add_button(label="Open output folder", callback=self.open_output), "btn_ghost")
+                                    dpg.add_child_window(tag="files_list", border=False)
+                                    dpg.bind_item_theme(dpg.last_item(), "flat")
+                        self._build_inspector()
 
     def _build_sidebar(self) -> None:
-        with dpg.child_window(width=300, height=-1, border=True, no_scrollbar=True):
+        with dpg.child_window(tag="sidebar_panel", width=SIDEBAR_W, height=-1, border=True, no_scrollbar=True):
             dpg.bind_item_theme(dpg.last_item(), "sidebar")
-            b = dpg.add_button(label="+   New task", width=-1, height=42, callback=lambda: self.new_task())
-            dpg.bind_item_theme(b, "btn_primary")
-            st.font(b, "semibold")
-            dpg.add_input_text(tag="task_search", hint="Search tasks...", width=-1,
+            with dpg.group(horizontal=True, horizontal_spacing=12):
+                logo = dpg.add_button(label="E", width=40, height=40)
+                dpg.bind_item_theme(logo, "btn_primary")
+                st.font(logo, "h2")
+                with dpg.group() as brand:
+                    dpg.bind_item_theme(brand, "tight")
+                    st.font(dpg.add_text("Ecogent"), "h2")
+                    st.font(dpg.add_text("token-efficient browser agent", color=st.FAINT), "small")
+            dpg.add_spacer(height=4)
+            card, _ = st.rich_button(0, 42, "btn_primary", callback=lambda: self.new_task())
+            st.put_icon(card, "add", 84, 13, color=(255, 255, 255), size="icon_sm")
+            st.put_text(card, "New task", 108, 8, "semibold", color=(255, 255, 255))
+            dpg.add_input_text(tag="task_search", hint="Search tasks", width=-1,
                                callback=lambda: self.refresh_chats())
-            st.section_label("Tasks")
-            dpg.add_child_window(tag="chat_list", height=-258, border=False)
-            dpg.bind_item_theme(dpg.last_item(), "flat")
+            with dpg.group(horizontal=True):
+                st.section_label("Tasks")
+                st.font(dpg.add_text("", tag="task_count", color=st.FAINT), "label")
+            dpg.add_child_window(tag="chat_list", height=-(4 * 44 + 18), border=False)
+            dpg.bind_item_theme(dpg.last_item(), "list")
             dpg.add_separator()
-            st.section_label("This task")
-            with dpg.group(horizontal=True):
-                self._stat("usage_in", "Tokens in")
-                self._stat("usage_out", "Tokens out")
-            with dpg.group(horizontal=True):
-                self._stat("usage_calls", "LLM calls")
-                self._stat("usage_hits", "Cache hits")
-            d = dpg.add_button(label="Delete task", width=-1, callback=self.delete_chat)
-            dpg.bind_item_theme(d, "btn_ghost")
+            for ic, label, cb in (("contact", "Browser profiles", self.open_profiles),
+                                  ("clock", "Schedules", self.open_schedules),
+                                  ("folder", "Output folder", self.open_output),
+                                  ("settings", "Settings", self.open_settings)):
+                card, _ = st.rich_button(0, 38, "nav_item", callback=cb)
+                st.put_icon(card, ic, 14, 11, color=st.FAINT, size="icon_sm")
+                st.put_text(card, label, 44, 6, color=st.MUTED)
 
-    def _stat(self, tag: str, label: str) -> None:
-        with dpg.child_window(width=128, height=80, border=True, no_scrollbar=True):
+    def _build_topbar(self) -> None:
+        with dpg.child_window(tag="topbar_panel", height=TOPBAR_H, border=True, no_scrollbar=True):
+            dpg.bind_item_theme(dpg.last_item(), "topbar")
+            with dpg.group(tag="top_left", horizontal=True, horizontal_spacing=12):
+                st.font(dpg.add_text("Welcome", tag="top_title"), "h2")
+                dpg.add_button(tag="chat_type", label="No task selected", show=False)
+                dpg.bind_item_theme("chat_type", "pill_info")
+            with dpg.group(tag="top_right", horizontal=True):
+                dpg.add_loading_indicator(tag="spinner", style=1, radius=1.3, show=False,
+                                          color=st.PRIMARY_HOVER, secondary_color=st.SURFACE_2)
+                dpg.add_button(tag="status", label="  Ready  ")
+                dpg.bind_item_theme("status", "pill_ok")
+                dpg.add_spacer(width=4)
+                dpg.bind_item_theme(dpg.add_button(tag="run_btn", label="Run again", callback=self.run_again,
+                                                   enabled=False), "btn_secondary")
+                with dpg.tooltip("run_btn"):
+                    dpg.add_text("Replay the saved plan (cached selectors, ~0 LLM tokens)")
+                dpg.bind_item_theme(dpg.add_button(tag="stop_btn", label="Stop", callback=self.stop, show=False),
+                                    "btn_danger")
+                st.icon_button("panel", "Show / hide the activity panel", self.toggle_inspector,
+                               fallback="Activity")
+
+    def _build_inspector(self) -> None:
+        with dpg.child_window(tag="inspector", width=INSPECTOR_W, height=-1, border=True, no_scrollbar=True):
+            dpg.bind_item_theme(dpg.last_item(), "card")
+            st.section_label("Usage  ·  this task")
+            tile_w = (INSPECTOR_W - 32 - 10) // 2
+            with dpg.group(horizontal=True):
+                self._stat("usage_in", "Tokens in", tile_w)
+                self._stat("usage_out", "Tokens out", tile_w)
+            with dpg.group(horizontal=True):
+                self._stat("usage_calls", "LLM calls", tile_w)
+                self._stat("usage_hits", "Cache hits", tile_w)
+            dpg.add_spacer(height=2)
+            dpg.add_separator()
+            with dpg.group(horizontal=True):
+                st.section_label("Activity")
+                dpg.add_spacer(width=INSPECTOR_W - 32 - 112)
+                st.icon_button("delete", "Clear the activity log", self.clear_log, height=28, width=30,
+                               fallback="Clear")
+            dpg.add_child_window(tag="log_view", height=-1, border=False)
+            dpg.bind_item_theme(dpg.last_item(), "list")
+
+    def _stat(self, tag: str, label: str, width: int) -> None:
+        with dpg.child_window(width=width, height=76, border=True, no_scrollbar=True):
             dpg.bind_item_theme(dpg.last_item(), "tile")
             st.font(dpg.add_text(label, color=st.FAINT), "small")
             st.font(dpg.add_text("-", tag=tag), "stat")
 
     def _build_chat(self) -> None:
-        with dpg.group(horizontal=True):
-            dpg.add_button(tag="chat_type", label="No task selected")
-            dpg.bind_item_theme("chat_type", "pill_info")
-            dpg.add_combo(["(temporary profile)"], tag="chat_profile", width=210,
+        with dpg.group(tag="chat_toolbar", horizontal=True, show=False):
+            dpg.add_combo(["(temporary profile)"], tag="chat_profile", width=220,
                           default_value="(temporary profile)", callback=self._profile_changed)
             with dpg.tooltip("chat_profile"):
                 dpg.add_text("Browser profile (saved logins/cookies)")
@@ -190,18 +236,44 @@ class EcogentApp:
             with dpg.tooltip(dpg.last_item()):
                 dpg.add_text("Selected folder for the built-in file tools (list/read/write/copy/...)")
             st.font(dpg.add_text("", tag="chat_folder", color=st.FAINT), "small")
-        dpg.add_child_window(tag="chat_view", height=-130, border=False)
-        dpg.bind_item_theme(dpg.last_item(), "flat")
-        with dpg.child_window(height=-1, border=True, no_scrollbar=True):
-            dpg.bind_item_theme(dpg.last_item(), "stat")
+            st.icon_button("delete", "Delete this task", self.delete_chat, theme="btn_ghost", fallback="Delete")
+        self._build_welcome()
+        dpg.add_child_window(tag="chat_view", height=-(COMPOSER_H + 10), border=False, show=False)
+        dpg.bind_item_theme(dpg.last_item(), "flat_pad")
+        with dpg.child_window(height=COMPOSER_H, border=True, no_scrollbar=True):
+            dpg.bind_item_theme(dpg.last_item(), "composer")
             with dpg.group(horizontal=True):
-                dpg.add_input_text(tag="chat_input", multiline=True, width=-128, height=68, on_enter=True,
-                                   callback=lambda: self.send())
-                b = dpg.add_button(label="Send", width=112, height=68, callback=lambda: self.send())
-                dpg.bind_item_theme(b, "btn_primary")
-                st.font(b, "semibold")
-            st.font(dpg.add_text("Enter to send  |  Ctrl+Enter for a new line  |  follow-ups reuse the saved plan",
-                                 color=st.FAINT), "small")
+                w = dpg.add_input_text(tag="chat_input", multiline=True, width=-64, height=60, on_enter=True,
+                                       callback=lambda: self.send())
+                dpg.bind_item_theme(w, "input_bare")
+                st.icon_button("send", "Send (Enter)", lambda: self.send(), theme="btn_primary",
+                               width=52, height=52, fallback="Send")
+            st.font(dpg.add_text("Enter to send  ·  Ctrl+Enter for a new line  ·  "
+                                 "follow-ups reuse the saved plan", color=st.FAINT), "small")
+
+    def _build_welcome(self) -> None:
+        with dpg.child_window(tag="welcome", height=-(COMPOSER_H + 10), border=False):
+            dpg.bind_item_theme(dpg.last_item(), "flat")
+            dpg.add_spacer(height=36)
+            with dpg.group(tag="welcome_inner"):
+                st.font(dpg.add_text("What should Ecogent do?"), "h1")
+                dpg.add_text("Describe a task in plain words. Ecogent plans it once, runs every step in Python\n"
+                             "and caches what worked - so running it again costs almost no LLM tokens.",
+                             color=st.FAINT)
+                dpg.add_spacer(height=10)
+                cards = [("list", "Scrape data", "Collect records from listings and pages,\nconfirm a sample, export CSV / JSON.", "scraping"),
+                         ("chart", "Analyze pages", "Read pages or files and get a summary,\ncomparison or table.", "analysis"),
+                         ("bolt", "Automate a flow", "Log in, fill forms and click through steps\nwith your saved browser profile.", "automation"),
+                         ("chat", "Just describe it", "Write the prompt and let Ecogent\ndetect the task type for you.", "auto")]
+                for i in range(0, len(cards), 2):
+                    with dpg.group(horizontal=True, horizontal_spacing=12) as row:
+                        for ic, title, desc, ttype in cards[i:i + 2]:
+                            card, _ = st.rich_button(row, 104, "type_card", width=WELCOME_CARD_W, user_data=ttype,
+                                                     callback=lambda s, a, u: self.new_task(task_type=u))
+                            self._welcome_cards.append(card)
+                            st.put_icon(card, ic, 20, 22, color=st.PRIMARY_HOVER, size="icon_lg")
+                            st.put_text(card, title, 66, 14, "semibold")
+                            st.put_text(card, desc, 66, 44, "small", color=st.FAINT)
 
     def _build_json_tab(self, key: str, filename: str, editable: bool) -> None:
         with dpg.group(horizontal=True):
@@ -236,7 +308,7 @@ class EcogentApp:
                      "in Settings before the first task.")
         try:
             while dpg.is_dearpygui_running():
-                dpg.run_callbacks(dpg.get_callback_queue())
+                self._run_callbacks()
                 self._poll()
                 dpg.render_dearpygui_frame()
                 dialogs.show_pending()
@@ -248,13 +320,36 @@ class EcogentApp:
             sys.stdout = sys.__stdout__
             dpg.destroy_context()
 
+    def _run_callbacks(self) -> None:
+        """Like dpg.run_callbacks, but one failing callback is logged instead of closing the app."""
+        for job in dpg.get_callback_queue() or []:
+            if job[0] is None:
+                continue
+            try:
+                n = len(inspect.signature(job[0]).parameters)
+                job[0](*job[1:n + 1])
+            except Exception as e:  # noqa: BLE001 - keep the GUI alive, show the error
+                self.log(f"Error: {type(e).__name__}: {e}")
+                traceback.print_exc()
+
     def _after_frame(self) -> None:
-        # Header: subtitle next to the title, controls pinned to the right edge.
-        hw = dpg.get_item_rect_size("header_bar")[0]
-        rw = dpg.get_item_rect_size("header_right")[0]
-        if hw and rw:
-            dpg.set_item_pos("header_right", [max(440, hw - rw - 20), 16])
-            dpg.set_item_pos("header_sub", [166, 27])
+        # Top bar: title vertically centred on the left, controls pinned to the right edge.
+        tw = dpg.get_item_rect_size("topbar_panel")[0]
+        lw, lh = dpg.get_item_rect_size("top_left")
+        rw, rh = dpg.get_item_rect_size("top_right")
+        if tw and rw:
+            dpg.set_item_pos("top_left", [18, max(0, (TOPBAR_H - lh) // 2)])
+            dpg.set_item_pos("top_right", [max(lw + 40, tw - rw - 16), max(0, (TOPBAR_H - rh) // 2)])
+        # Welcome screen: size the idea cards to the space and centre them horizontally.
+        if dpg.is_item_shown("welcome"):
+            ww = dpg.get_item_rect_size("welcome")[0]
+            card_w = max(260, min(WELCOME_CARD_W, (ww - 12) // 2))
+            indent = max(0, (ww - (2 * card_w + 12)) // 2)
+            if ww and (indent, card_w) != self._welcome_indent:
+                self._welcome_indent = (indent, card_w)
+                dpg.configure_item("welcome_inner", indent=indent)
+                for card in self._welcome_cards:
+                    dpg.configure_item(card, width=card_w)
         # Scroll max is only known after the new items were laid out.
         if self._scroll_chat:
             self._scroll_chat -= 1
@@ -267,16 +362,29 @@ class EcogentApp:
 
     # ------------------------------------------------------------------ helpers
     def log(self, text: str) -> None:
+        stamp = datetime.now().strftime("%H:%M:%S")
         for line in text.splitlines() or [""]:
+            # BrowserManager prints emoji the UI font cannot draw; drop them instead of showing "?" boxes.
+            line = "".join(ch for ch in line if ord(ch) < 0x2600 or 0x2800 <= ord(ch) < 0xFE00).strip()
             low = line.lower()
             color = st.DANGER if ("failed" in low or "error" in low) else \
                 st.SUCCESS if ("run done" in low or "output written" in low or "browser ready" in low) else \
                 st.WARNING if ("captcha" in low or "healing" in low or "waiting" in low) else st.MUTED
-            st.font(dpg.add_text(line, parent="log_view", color=color), "small")
+            with dpg.group(horizontal=True, parent="log_view", horizontal_spacing=8):
+                st.font(dpg.add_text(stamp, color=(100, 116, 139)), "small")
+                st.font(dpg.add_text(line, color=color, wrap=0), "small")
         children = dpg.get_item_children("log_view", 1) or []
         for item in children[: max(0, len(children) - MAX_LOG_LINES)]:
             dpg.delete_item(item)
         self._scroll_log = 2
+
+    def clear_log(self, *_) -> None:
+        dpg.delete_item("log_view", children_only=True)
+
+    def toggle_inspector(self, *_) -> None:
+        show = not dpg.is_item_shown("inspector")
+        dpg.configure_item("inspector", show=show)
+        dpg.configure_item("main_card", width=-(INSPECTOR_W + GAP) if show else -1)
 
     def set_status(self, text: str, kind: str = "ok") -> None:
         dpg.configure_item("status", label=f"  {text[:60]}  ")
@@ -302,27 +410,45 @@ class EcogentApp:
     def refresh_chats(self) -> None:
         dpg.delete_item("chat_list", children_only=True)
         query = (dpg.get_value("task_search") or "").strip().lower()
-        chats = [m for m in ChatSession.list_all(self.settings.chats_path)
-                 if not query or query in m.get("title", "").lower()]
+        all_chats = ChatSession.list_all(self.settings.chats_path)
+        chats = [m for m in all_chats if not query or query in m.get("title", "").lower()]
+        dpg.set_value("task_count", str(len(all_chats)) if all_chats else "")
         if not chats:
-            st.font(dpg.add_text("No tasks yet.\nClick '+ New task' to start." if not query else "No matching tasks.",
-                                 parent="chat_list", color=st.FAINT), "small")
+            dpg.add_spacer(height=8, parent="chat_list")
+            st.font(dpg.add_text("No tasks yet.\nClick 'New task' or pick an idea\non the right to start."
+                                 if not query else "No matching tasks.",
+                                 parent="chat_list", color=st.FAINT, indent=6), "small")
         for m in chats:
-            title = m.get("title", m["id"])
-            title = title if len(title) <= 30 else title[:29] + "..."
-            label = f"{title}\n{TASK_LABELS.get(m.get('task_type'), '')}   ·   {m.get('status', 'new')}"
-            b = dpg.add_button(label=label, parent="chat_list", width=-1, height=70, user_data=m["id"],
-                               callback=self._chat_clicked)
-            dpg.bind_item_theme(b, "task_item_active" if m["id"] == self.current else "task_item")
+            status = m.get("status", "new")
+            card, _ = st.rich_button("chat_list", 60, "task_item_active" if m["id"] == self.current else "task_item",
+                                     callback=self._chat_clicked, user_data=m["id"])
+            st.put_dot(card, 13, 16, status, callback=self._chat_clicked, user_data=m["id"])
+            st.put_text(card, st.truncate(m.get("title") or m["id"], 25), 30, 6, "semibold")
+            meta = "  ·  ".join(x for x in (TASK_LABELS.get(m.get("task_type"), ""), status,
+                                                  _ago(m.get("updated", ""))) if x)
+            st.put_text(card, meta, 30, 32, "small", color=st.FAINT)
 
     def _highlight_current(self) -> None:
-        for item in dpg.get_item_children("chat_list", 1) or []:
-            if dpg.get_item_type(item).endswith("mvButton"):
-                dpg.bind_item_theme(item, "task_item_active" if dpg.get_item_user_data(item) == self.current else "task_item")
+        for card in dpg.get_item_children("chat_list", 1) or []:
+            items = dpg.get_item_children(card, 1) or []
+            # The first child of a task card is its full-size button (see st.rich_button).
+            if items and dpg.get_item_type(items[0]).endswith("mvButton"):
+                dpg.bind_item_theme(items[0], "task_item_active" if dpg.get_item_user_data(items[0]) == self.current
+                                    else "task_item")
 
     def _chat_clicked(self, sender, value, chat_id) -> None:
         if chat_id != self.current:
             self.load_chat(chat_id)
+
+    def _show_task_view(self, has_task: bool) -> None:
+        dpg.configure_item("welcome", show=not has_task)
+        dpg.configure_item("chat_view", show=has_task)
+        dpg.configure_item("chat_toolbar", show=has_task)
+        dpg.configure_item("chat_type", show=has_task)
+        dpg.configure_item("run_btn", enabled=has_task)
+        if not has_task:
+            dpg.set_value("top_title", "Welcome")
+            self._welcome_indent = ()
 
     def load_chat(self, chat_id: str) -> None:
         self.current = chat_id
@@ -330,6 +456,8 @@ class EcogentApp:
         if not s:
             return
         meta = s.meta
+        self._show_task_view(True)
+        dpg.set_value("top_title", st.truncate(meta.get("title") or chat_id, 60))
         dpg.configure_item("chat_type", label=f"  {TASK_LABELS.get(meta.get('task_type'), '-')}  ")
         dpg.configure_item("chat_profile", items=["(temporary profile)"] + self._profiles())
         dpg.set_value("chat_profile", meta.get("profile") or "(temporary profile)")
@@ -337,7 +465,7 @@ class EcogentApp:
         dpg.set_value("chat_folder", meta.get("work_folder") or "no folder selected (output folder)")
         dpg.delete_item("chat_view", children_only=True)
         for m in s.chat.get("messages", []):
-            self._append_chat(m["role"], m["text"])
+            self._append_chat(m["role"], m["text"], m.get("time", ""))
         for key, filename, *_ in JSON_TABS:
             self.json_path[key] = s.folder / filename
             self._load_json(key, force=True)
@@ -345,16 +473,25 @@ class EcogentApp:
         self._update_usage()
         self._highlight_current()
 
-    def _append_chat(self, role: str, text: str) -> None:
+    def _append_chat(self, role: str, text: str, when: str = "") -> None:
         user = role == "user"
-        indent = BUBBLE_INDENT if user else 0
-        st.font(dpg.add_text("You" if user else "Ecogent", parent="chat_view", indent=indent + 4,
-                             color=st.PRIMARY_HOVER if user else st.SUCCESS), "label")
-        bubble = dpg.add_child_window(parent="chat_view", indent=indent, width=-1 if user else -BUBBLE_INDENT,
-                                      auto_resize_y=True, border=True, no_scrollbar=True)
-        dpg.bind_item_theme(bubble, "bubble_user" if user else "bubble_agent")
-        dpg.add_text(text.strip(), parent=bubble, wrap=0)
-        dpg.add_spacer(height=4, parent="chat_view")
+        try:
+            stamp = datetime.fromisoformat(when).strftime("%H:%M") if when else datetime.now().strftime("%H:%M")
+        except ValueError:
+            stamp = ""
+        with dpg.group(horizontal=True, parent="chat_view", horizontal_spacing=12):
+            glyph = st.icon("user") if user else ""
+            av = dpg.add_button(label=glyph or ("Y" if user else "E"), width=36, height=36)
+            dpg.bind_item_theme(av, "avatar_user" if user else "avatar_agent")
+            st.font(av, "icon" if glyph else "semibold")
+            with dpg.group():
+                with dpg.group(horizontal=True, horizontal_spacing=8):
+                    st.font(dpg.add_text("You" if user else "Ecogent"), "semibold")
+                    st.font(dpg.add_text(stamp, color=st.FAINT), "small")
+                bubble = dpg.add_child_window(width=-48, auto_resize_y=True, border=True, no_scrollbar=True)
+                dpg.bind_item_theme(bubble, "bubble_user" if user else "bubble_agent")
+                dpg.add_text(text.strip(), parent=bubble, wrap=0)
+        dpg.add_spacer(height=6, parent="chat_view")
         self._scroll_chat = 3
 
     def _load_json(self, key: str, force: bool = False) -> None:
@@ -421,8 +558,8 @@ class EcogentApp:
                     dpg.bind_item_theme(b, "btn_secondary")
 
     # ------------------------------------------------------------------ actions
-    def new_task(self, prompt: str = "") -> None:
-        dialogs.NewTaskDialog(self.settings, self._profiles(), prompt, self._create_task)
+    def new_task(self, prompt: str = "", task_type: str = "") -> None:
+        dialogs.NewTaskDialog(self.settings, self._profiles(), prompt, self._create_task, task_type=task_type)
 
     def _create_task(self, r: dict) -> None:
         if r["task_type"] == "auto":
@@ -487,7 +624,7 @@ class EcogentApp:
             self.scheduler.remove(cid)
             self.current = None
             dpg.delete_item("chat_view", children_only=True)
-            dpg.configure_item("chat_type", label="No task selected")
+            self._show_task_view(False)
             self._update_usage()
             self.worker.submit("Delete task", self.worker.agent.delete_chat, cid)
         dialogs.ConfirmDialog(f"Delete '{s.meta.get('title')}' and its collected data?\n"
@@ -577,6 +714,7 @@ class EcogentApp:
                 s = self.session()
                 if s:
                     dpg.set_value("chat_profile", s.meta.get("profile") or "(temporary profile)")
+                    dpg.set_value("top_title", st.truncate(s.meta.get("title") or cid, 60))
         elif k == "select":
             self.current = cid
             self.refresh_chats()
@@ -588,7 +726,7 @@ class EcogentApp:
         elif k == "busy":
             busy = bool(p.get("busy"))
             dpg.configure_item("spinner", show=busy)
-            dpg.configure_item("stop_btn", enabled=busy)
+            dpg.configure_item("stop_btn", show=busy)
             self.set_status(p.get("label", "Working...") if busy else "Ready", "busy" if busy else "ok")
             if not busy and self.current:
                 self._load_files()

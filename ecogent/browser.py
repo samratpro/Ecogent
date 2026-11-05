@@ -144,7 +144,11 @@ class BrowserSession:
             self.log("Switched to newly opened tab")
 
     def goto(self, url: str) -> None:
-        if not url.startswith(("http://", "https://", "file:", "about:")):
+        url = (url or "").strip()
+        scheme = url.split(":", 1)[0].lower() if "://" in url or url.lower().startswith("about:") else ""
+        if scheme and scheme not in ("http", "https", "about"):
+            raise BrowserError(f"only http/https pages can be opened, not '{scheme}:' (local files go through the file tools)")
+        if not scheme:
             url = "https://" + url
         self.page.goto(url, wait_until="domcontentloaded")
         self._settle()

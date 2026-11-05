@@ -48,7 +48,12 @@ Goal: navigate to the listing, then let extract_records build ONE reusable CSS p
 Typical steps: open_url (category / search URL, add filters in the URL when possible) ->
 extract_records -> write_output.
 Fill plan.scrape: fields (name + description), filters (e.g. {"field":"price","op":"<","value":50}),
-max_items, max_pages. Default output format csv.""",
+max_items, max_pages. Default output format csv.
+- Fields must be visible on the LISTING page itself (e.g. title, price, rating, reviews, url, image).
+  Never ask for data that only exists on detail pages (full descriptions, specs).
+- Always include a field for every filter (a price limit needs a "price" field) and a "url" field.
+- Put numeric limits in plan.scrape.filters even when the URL also filters: sites ignore unknown URL params.
+- On open_url steps use validation {"url_contains": ...} only; page text varies too much.""",
     "automation": """TASK TYPE: AUTOMATION
 Automation usually needs: 1) credentials (the user logs in manually once; the browser profile
 keeps the cookies), 2) user-provided information to submit, 3) a schedule.
@@ -119,7 +124,10 @@ Return JSON:
  "fields": {"<field>": {"selector": "CSS relative to the item ('' = the item itself)", "attr": "text|href|src|<attribute>"}},
  "pagination": "next|scroll|none",
  "next_selector": "CSS of the next-page link/button ('' if none)"}
-Use stable class names or attributes, avoid positions like nth-child when possible."""
+Use stable class names or attributes, avoid positions like nth-child when possible.
+Use EXACTLY the field names you are given. Each field selects its own small child element
+(title link, price span, ...); use "" only when the whole block really is the value.
+item_selector must select the whole record block (one per record), not an image or text part."""
 
 VALIDATE = """Check whether sample scraped records match what the user wants.
 Return JSON {"ok": true|false, "problems": "what is wrong and which field (empty if ok)"}."""

@@ -25,8 +25,10 @@ class FileToolError(Exception):
 
 
 class FileTools:
-    def __init__(self, roots: Iterable[Path], base: Path, extra_files: Iterable[Path] = ()):
+    def __init__(self, roots: Iterable[Path], base: Path, extra_files: Iterable[Path] = (),
+                 readonly_roots: Iterable[Path] = ()):
         self.roots = [Path(r).resolve() for r in roots if r]
+        self.readonly = [Path(r).resolve() for r in readonly_roots if r]   # readable, never written
         self.base = Path(base).resolve()
         self.extra = {Path(p).resolve() for p in extra_files if p}
 
@@ -37,6 +39,8 @@ class FileTools:
         p = Path(str(path).strip().strip('"'))
         p = (p if p.is_absolute() else self.base / p).resolve()
         inside = any(p == r or r in p.parents for r in self.roots)
+        if not inside and not writable and any(p == r or r in p.parents for r in self.readonly):
+            inside = True
         if not inside and not (p in self.extra and not writable):
             raise FileToolError(f"path outside the allowed folders: {p}")
         if must_exist and not p.exists():

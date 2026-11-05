@@ -113,22 +113,32 @@ class ScrapeEngine:
             else:
                 self.log("Stored pattern failed validation; healing it")
 
-        feedback, llm_rounds, user_rounds = "", 0, 0
+        feedback, user_rounds, llm_rejects = "", 0, 0
+        budget = ex.settings.max_heal_attempts + 2      # pattern LLM calls per run, across step retries
+        hint = step.get("item_selector") or ""
         while need_build:
             ex.check_stop()
-            if llm_rounds > ex.settings.max_heal_attempts + 2 or user_rounds > 3:
-                from .executor import StepFailed
-                raise StepFailed(f"could not build a working scraping pattern: {feedback}")
-            llm_rounds += 1
-            pattern = self.build(html, url, feedback, pattern)
+            if ex.pattern_calls >= budget or user_rounds > 3:
+                from .executor import NoHeal
+                raise NoHeal(f"could not build a working scraping pattern after {ex.pattern_calls} tries: {feedback}")
+            ex.pattern_calls += 1
+            pattern = self.build(html, url, feedback, pattern, hint)
             rows = apply_pattern(pattern, html, url)
             if not rows:
                 feedback = f"item_selector '{pattern.get('item_selector')}' matched 0 records with values."
+                self.log(f"Pattern rejected: {feedback}")
+                continue
+            # Free checks first: only ask the LLM to validate a sample that is structurally sane.
+            problems = self.local_problems(pattern, rows)
+            if problems:
+                feedback = problems
+                self.log(f"Pattern rejected: {feedback}")
                 continue
             filtered = apply_filters(rows, self.spec.get("filters", []))
             sample = (filtered or rows)[: ex.settings.scrape_sample_size]
-            verdict = self.validate(sample)
-            if not verdict.get("ok", True) and llm_rounds <= ex.settings.max_heal_attempts:
+            verdict = self.validate(sample) if llm_rejects < 2 else {"ok": True}
+            if not verdict.get("ok", True) and ex.pattern_calls < budget:
+                llm_rejects += 1
                 feedback = verdict.get("problems", "sample does not match the request")
                 self.log(f"Sample rejected by LLM: {feedback}")
                 continue
@@ -156,6 +166,24 @@ class ScrapeEngine:
         self.log(f"Scraped {len(records)} records")
         return len(records)
 
+    def local_problems(self, pattern: dict, rows: list[dict]) -> str:
+        """Structural problems found without the LLM (empty fields, whole-card text, missing fields)."""
+        out = []
+        wanted = [f.get("name") for f in self.spec.get("fields", []) if isinstance(f, dict) and f.get("name")]
+        missing = [w for w in wanted if w not in (pattern.get("fields") or {})]
+        if missing:
+            out.append(f"pattern has no selector for fields {missing}; use exactly these field names")
+        rates = fill_rates(rows)
+        empty = [k for k, r in rates.items() if r == 0]
+        if empty:
+            out.append(f"fields {empty} are empty in every record: their selectors match nothing inside the item")
+        for name, f in (pattern.get("fields") or {}).items():
+            vals = [str(r.get(name, "")) for r in rows[:20] if r.get(name)]
+            if vals and sum(len(v) for v in vals) / len(vals) > 300:
+                out.append(f"field '{name}' contains the whole block text (avg {sum(len(v) for v in vals) // len(vals)} "
+                           "chars); select the specific child element instead")
+        return "; ".join(out)
+
     def _still_valid(self, pattern: dict, rows: list[dict]) -> bool:
         v = pattern.get("validation") or {}
         if len(rows) < min(v.get("min_items", 1), 3):
@@ -164,8 +192,9 @@ class ScrapeEngine:
         return all(now.get(k, 0) >= rate * 0.6 - 0.05 for k, rate in v.get("fill_rates", {}).items())
 
     # ------------------------------------------------------------------ LLM parts
-    def build(self, html: str, url: str, feedback: str, previous: Optional[dict]) -> dict:
-        groups = pr.repeating_groups(html)
+    def build(self, html: str, url: str, feedback: str, previous: Optional[dict], hint: str = "") -> dict:
+        # Rebuilds only need a smaller sample: the LLM already saw the structure once.
+        groups = pr.repeating_groups(html, sample_chars=1500 if previous and feedback else 2500)
         nexts = pr.next_page_candidates(html)
         self.ex.stats.llm_lookups += 1
         msg = [
@@ -179,6 +208,8 @@ class ScrapeEngine:
         if not groups:
             msg.append(pr.page_outline(html, self.ex.settings.max_page_chars))
         msg.append(f"Next-page candidates: {json.dumps(nexts, ensure_ascii=False)}")
+        if hint:
+            msg.append(f"Planner's guess for item_selector (verify against the blocks above): {hint}")
         if previous:
             msg.append(f"Previous pattern: {json.dumps({k: previous.get(k) for k in ('item_selector', 'fields', 'pagination', 'next_selector')})}")
         if feedback:
@@ -202,8 +233,8 @@ class ScrapeEngine:
     # ------------------------------------------------------------------ full run
     def scrape_all(self, pattern: dict) -> list[dict]:
         ex, b = self.ex, self.ex.browser
-        max_items = int(self.spec.get("max_items", 200))
-        max_pages = int(self.spec.get("max_pages", 10))
+        max_items = int(self.spec.get("max_items") or 200)
+        max_pages = int(self.spec.get("max_pages") or 10)
         records, seen = [], set()
         for page_no in range(1, max_pages + 1):
             ex.check_stop()

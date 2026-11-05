@@ -21,7 +21,7 @@ from typing import Any, Optional
 
 from . import page_reader as pr
 from . import prompts, toolbox
-from .bridge import UIBridge
+from .bridge import HeadlessBridge, UIBridge
 from .browser import BrowserSession
 from .config import Settings
 from .llm import LLMError, LLMRouter
@@ -38,7 +38,13 @@ class StepFailed(Exception):
 
 
 class NeedsUser(StepFailed):
-    pass
+    def __init__(self, message: str, in_browser: bool = True):
+        super().__init__(message)
+        self.in_browser = in_browser      # the human must act in the browser window
+
+
+class NoHeal(StepFailed):
+    """A failure that step healing cannot fix (e.g. the scraping pattern budget is used up)."""
 
 
 @dataclass
@@ -72,13 +78,16 @@ class Executor:
         self.vars: dict[str, Any] = {}
         self.item: Optional[str] = None
         self.stats = RunStats()
+        self.pattern_calls = 0          # shared by every extract_records attempt in this run
+        self.force_visible = False      # set after a captcha in headless mode
         meta = session.meta
         self.task_type = meta.get("task_type", "others")
         work = meta.get("work_folder", "")
         self.files = FileTools(
-            [session.folder, session.ensure_temp(), session.output_dir, work],
+            [session.ensure_temp(), session.output_dir, work],
             base=Path(work) if work else session.output_dir,
             extra_files=[meta.get("user_info_file", "")],
+            readonly_roots=[session.folder],
         )
         self.user = session.user_info()
 
@@ -113,7 +122,7 @@ class Executor:
                 if field not in self.user:
                     got = self.ui.ask_user_info(self.chat_id, [field], f"The task needs '{field}'.")
                     if not got:
-                        raise NeedsUser(f"missing user info '{field}'")
+                        raise NeedsUser(f"missing user info '{field}'", in_browser=False)
                     self.user.update(got)
                     stored = self.session.user_info()
                     stored.update(got)
@@ -126,7 +135,21 @@ class Executor:
 
     def _ensure_browser(self) -> None:
         meta = self.session.meta
-        self.browser.ensure(profile=meta.get("profile", ""), headless=meta.get("headless"))
+        headless = False if self.force_visible else meta.get("headless")
+        self.browser.ensure(profile=meta.get("profile", ""), headless=headless)
+
+    def _show_browser(self) -> None:
+        """A human cannot solve a captcha in an invisible browser: reopen it visibly on the same page."""
+        if self.force_visible or not self.browser.alive or not self.browser.headless:
+            return
+        if isinstance(self.ui, HeadlessBridge):
+            return
+        url = self.browser.url
+        self.log("Headless mode: opening a visible browser so you can handle this")
+        self.force_visible = True
+        self._ensure_browser()
+        if url.startswith(("http://", "https://")):
+            self.browser.goto(url)
 
     def _check_blocker(self) -> None:
         reason = pr.detect_blocker(self.browser.html())
@@ -198,11 +221,16 @@ class Executor:
 
                 if isinstance(e, NeedsUser) and user_holds < 3:
                     user_holds += 1
+                    if e.in_browser:
+                        try:
+                            self._show_browser()
+                        except Exception as be:  # noqa: BLE001 - still ask the user
+                            self.log(f"Could not open a visible browser: {be}")
                     if self.ui.hold(self.chat_id, str(e)):
                         continue
                     raise StopRequested("aborted by user")
 
-                if heals < self.settings.max_heal_attempts:
+                if heals < self.settings.max_heal_attempts and not isinstance(e, NoHeal):
                     heals += 1
                     decision = self.heal(current, err)
                     d = (decision or {}).get("decision")
@@ -397,8 +425,10 @@ class Executor:
         if v.get("url_contains") and v["url_contains"].lower() not in self.browser.url.lower():
             raise StepFailed(f"validation: url does not contain '{v['url_contains']}'")
         if v.get("text_contains"):
-            _, text = pr.main_text(self.browser.html(), 200000)
-            if v["text_contains"].lower() not in text.lower():
+            # Whole page incl. header/nav: a search box value or heading there is a valid match.
+            text = " ".join(pr.soup_of(self.browser.html()).get_text(" ").split()).lower()
+            title = self.browser.title().lower()
+            if v["text_contains"].lower() not in text and v["text_contains"].lower() not in title:
                 raise StepFailed(f"validation: page does not contain '{v['text_contains']}'")
 
     # ------------------------------------------------------------------ element resolution
@@ -503,7 +533,7 @@ class Executor:
 
     def act_collect_links(self, step: dict, key: str) -> list[str]:
         all_links = pr.links(self.browser.html(), self.browser.url)
-        limit = int(step.get("limit", 10))
+        limit = int(step.get("limit") or 10)
         r = self.rec(key)
         chosen = []
         sigs = set(r.get("link_signatures", []))
@@ -542,7 +572,7 @@ class Executor:
             items = self.data().get("collected", {}).get(source, [])
         if isinstance(items, str):
             items = [items]
-        limit = int(step.get("limit", len(items) or 0))
+        limit = int(step.get("limit") or len(items) or 0)
         dedupe = bool(step.get("dedupe"))
         processed = self.data().setdefault("processed", {}).setdefault(key, []) if dedupe else []
         done = 0

@@ -72,7 +72,8 @@ class AnalysisEngine:
         ex = self.ex
         notes_dir = ex.session.ensure_temp() / "notes"
         notes_dir.mkdir(exist_ok=True)
-        key = hashlib.sha1(f"{f['path']}|{len(text)}|{focus}".encode()).hexdigest()[:16]
+        # Content hash: changed pages get fresh notes, unchanged pages reuse notes for free.
+        key = hashlib.sha1(f"{text}|{focus}".encode("utf-8", "replace")).hexdigest()[:16]
         cache = notes_dir / f"{key}.md"
         if cache.exists():
             ex.stats.cache_hits += 1
