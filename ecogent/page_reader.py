@@ -26,6 +26,23 @@ BLOCKER_PATTERNS = [
     "press and hold", "security check", "checking your browser",
 ]
 
+# ---- token diet: what never needs to reach the LLM
+# Generated / hashed class names (css-1x2y3z, sc-AbCd, jsx-123, a1b2c3d4): unstable and pure noise.
+_HASHED_CLASS = re.compile(r"^(css|sc|jsx|emotion|styled|svelte|chakra)[-_][\w-]+$|\d{3,}|"
+                           r"^(?=[A-Za-z\d]*\d)(?=[A-Za-z\d]*[A-Za-z])[A-Za-z\d]{6,}$")
+# Blocks that are never page content (for page text only, not for element search).
+_NOISE_BLOCK = re.compile(r"cookie|consent|gdpr|newsletter|subscribe|social|share|breadcrumb|advert|\bads?\b|"
+                          r"promo|popup|sidebar|related|recommend|banner", re.I)
+_NOISE_ROLES = {"navigation", "banner", "contentinfo", "complementary", "search"}
+# Short UI lines that carry no information.
+_NOISE_LINE = re.compile(r"^(skip to (main )?content|menu|main menu|close|open|share( this)?|sign in|log ?in|log ?out|"
+                         r"sign up|register|subscribe|accept( all)?( cookies)?|reject( all)?|cookie settings|"
+                         r"back to top|toggle navigation|search|home|more|show more|read more|loading\.*|"
+                         r"advertisement|sponsored|previous|next)$", re.I)
+_TRACKING_PARAM = re.compile(r"^(utm_\w+|fbclid|gclid|msclkid|ref|ref_|_ga|mc_\w+|igshid|spm|si)$", re.I)
+STOP_WORDS = {"the", "and", "for", "with", "this", "that", "into", "from", "main", "page", "please", "click",
+              "type", "enter", "field", "box", "button", "link", "input", "area", "section", "top", "your"}
+
 
 def soup_of(html: str) -> BeautifulSoup:
     soup = BeautifulSoup(html or "", "html.parser")
@@ -36,6 +53,27 @@ def soup_of(html: str) -> BeautifulSoup:
 
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
+
+
+def clean_classes(classes, limit: int = 3) -> list[str]:
+    """Stable, human-written class names only (hashed / generated ones dropped)."""
+    if isinstance(classes, str):
+        classes = classes.split()
+    return [c for c in (classes or []) if c and len(c) < 40 and not _HASHED_CLASS.search(c)][:limit]
+
+
+def short_url(url: str, base_url: str = "") -> str:
+    """Drop scheme/host when it is the page's own host and strip tracking params."""
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+    try:
+        u = urlsplit(url)
+        q = urlencode([(k, v) for k, v in parse_qsl(u.query, keep_blank_values=True) if not _TRACKING_PARAM.match(k)])
+        host = urlsplit(base_url).netloc if base_url else ""
+        if host and u.netloc == host:
+            return urlunsplit(("", "", u.path or "/", q, ""))
+        return urlunsplit((u.scheme, u.netloc, u.path, q, ""))
+    except ValueError:
+        return url
 
 
 def _is_hidden(el: Tag) -> bool:
@@ -126,15 +164,42 @@ def _interactive(el: Tag) -> bool:
         el.has_attr("role") or el.has_attr("onclick") or el.has_attr("contenteditable")
 
 
-def _score(info: dict, words: list[str]) -> int:
-    hay = (info["text"] + " " + " ".join(info["attrs"].values())).lower()
-    return sum(3 if w in info["text"].lower() else 1 for w in words if w in hay)
+def hint_words(hint: str) -> list[str]:
+    return [w for w in re.findall(r"[a-z0-9]+", (hint or "").lower()) if len(w) > 2 and w not in STOP_WORDS]
+
+
+# Words in a step target that describe the element kind ("search box", "Next button").
+_KIND_WORDS = {
+    "button": lambda t, r, ty: t == "button" or r == "button" or ty in ("submit", "button"),
+    "link": lambda t, r, ty: t == "a" or r == "link",
+    "box": lambda t, r, ty: t in ("input", "textarea") or r in ("textbox", "searchbox"),
+    "field": lambda t, r, ty: t in ("input", "textarea", "select"),
+    "input": lambda t, r, ty: t in ("input", "textarea"),
+    "dropdown": lambda t, r, ty: t == "select" or r in ("combobox", "listbox"),
+    "checkbox": lambda t, r, ty: ty == "checkbox" or r == "checkbox",
+    "tab": lambda t, r, ty: r == "tab",
+}
+
+
+def score_element(info: dict, words: list[str], hint: str = "") -> int:
+    """Text match counts most (3), attribute match 1, element-kind match ("button") 1."""
+    text = info["text"].lower()
+    hay = text + " " + " ".join(info["attrs"].values()).lower()
+    s = sum(3 if w in text else 1 for w in words if w in hay)
+    tag, role, typ = info["tag"], info["attrs"].get("role", "").lower(), info["attrs"].get("type", "").lower()
+    low = (hint or "").lower()
+    s += sum(1 for kw, test in _KIND_WORDS.items() if kw in low and test(tag, role, typ))
+    if text and low.strip() and text == low.strip():
+        s += 3                      # exact visible text: "Search" for target "Search"
+    return s
 
 
 def candidates(html: str, action: str, hint: str, level: int = 1, limit: Optional[int] = None) -> list[dict]:
+    """Probable elements for a step, best first. Each has i, tag, text, attrs, selector, score.
+    Identical-looking elements (same tag/text/attrs) are listed once."""
     soup = soup_of(html)
-    words = [w for w in re.findall(r"[a-z0-9]+", (hint or "").lower()) if len(w) > 2]
-    pool = []
+    words = hint_words(hint)
+    pool, seen = [], set()
     for el in soup.find_all(True):
         if _is_hidden(el):
             continue
@@ -145,27 +210,63 @@ def candidates(html: str, action: str, hint: str, level: int = 1, limit: Optiona
         info = describe(el)
         if not info["text"] and not info["attrs"]:
             continue
+        sig = (info["tag"], info["text"], tuple(sorted(info["attrs"].items())))
+        if sig in seen:
+            continue
+        seen.add(sig)
         info["_el"] = el
-        info["score"] = _score(info, words)
+        info["score"] = score_element(info, words, hint)
         pool.append(info)
     limit = limit or (15 if level == 1 else 60)
     pool.sort(key=lambda d: -d["score"])  # stable: keeps document order on ties
     out = []
     for i, info in enumerate(pool[:limit]):
         el = info.pop("_el")
-        info.pop("score")
         info["i"] = i
         info["selector"] = css_selector(el, soup)
         out.append(info)
     return out
 
 
-def candidates_for_prompt(cands: list[dict]) -> str:
+_ATTR_SHORT = {"placeholder": "ph", "aria-label": "aria", "data-testid": "tid"}
+
+
+def candidates_for_prompt(cands: list[dict], base_url: str = "") -> str:
+    """One short line per candidate: `[3] <input name=q ph="Search papers"> text`.
+    Attributes repeating the visible text are dropped, links are shortened."""
     lines = []
     for c in cands:
-        attrs = " ".join(f'{k}="{v}"' for k, v in c["attrs"].items())
-        lines.append(f'[{c["i"]}] <{c["tag"]} {attrs}> {c["text"]}'.replace("  ", " "))
+        text = c["text"]
+        low = text.lower()
+        parts = []
+        shown = set()
+        for k, v in c["attrs"].items():
+            vl = v.lower()
+            if vl == low or vl in shown or (k == "value" and c["tag"] in ("input", "textarea")
+                                           and c["attrs"].get("type", "text") not in ("submit", "button", "reset")):
+                continue
+            if k == "href":
+                v = short_url(v, base_url)[:70]
+            shown.add(vl)
+            v = v if re.fullmatch(r"[\w./:-]+", v) else f'"{v}"'
+            parts.append(f"{_ATTR_SHORT.get(k, k)}={v}")
+        attrs = (" " + " ".join(parts)) if parts else ""
+        lines.append(f'[{c["i"]}] <{c["tag"]}{attrs}> {text}'.rstrip())
     return "\n".join(lines)
+
+
+def obvious_choice(cands: list[dict], action: str) -> Optional[dict]:
+    """The candidate that clearly wins without asking the LLM, or None when it is ambiguous:
+    the only candidate of the right kind, or a top score that is strong and well ahead."""
+    if not cands:
+        return None
+    if len(cands) == 1 and (cands[0].get("score", 0) > 0 or action in ("fill", "press", "select_option", "upload")):
+        return cands[0]
+    top = cands[0].get("score", 0)
+    second = cands[1].get("score", 0) if len(cands) > 1 else 0
+    if top >= 4 and top >= 2 * second + 1:
+        return cands[0]
+    return None
 
 
 # --------------------------------------------------------------------------- page text
@@ -174,22 +275,72 @@ def main_text(html: str, max_chars: int = 12000) -> tuple[str, str]:
     m = re.search(r"<title[^>]*>(.*?)</title>", html or "", flags=re.IGNORECASE | re.DOTALL)
     title = _norm(BeautifulSoup(m.group(1), "html.parser").get_text()) if m else ""
     soup = soup_of(html)
-    root = soup.find("main") or soup.find("article") or soup.body or soup
+    root = _content_root(soup)
     for t in root.find_all(CHROME_TAGS):
         t.decompose()
+    _drop_noise_blocks(root)
     lines = [_norm(l) for l in root.get_text("\n").splitlines()]
-    lines = [l for l in lines if len(l) > 2]
+    lines = [l for l in lines if len(l) > 2 and not _NOISE_LINE.match(l) and not _is_junk_line(l)]
     counts = Counter(lines)
     kept: list[str] = []
+    seen_long: set[str] = set()
     for l in lines:
         # Outlier: short boilerplate repeated on every card ("Add to cart"). Lines with digits are data
         # (prices, ratings) and are kept even when two products share the same value.
         if counts[l] > 3 and len(l) < 60 and not re.search(r"\d", l):
             continue
-        if kept and kept[-1] == l:          # only adjacent duplicates are noise
+        if kept and kept[-1] == l:          # adjacent duplicates are noise
             continue
+        if len(l) >= 60:                    # a long sentence repeated anywhere (teasers, captions)
+            if l in seen_long:
+                continue
+            seen_long.add(l)
         kept.append(l)
     return title, "\n".join(kept)[:max_chars]
+
+
+def _content_root(soup: BeautifulSoup) -> Tag:
+    """<main>, else the article only when it holds most of the page (a listing page has one
+    <article> per card: taking the first would keep a single product), else <body>."""
+    body = soup.body or soup
+    main = soup.find("main")
+    if main:
+        return main
+    articles = soup.find_all("article")
+    if articles:
+        total = len(body.get_text(" ")) or 1
+        best = max(articles, key=lambda a: len(a.get_text(" ")))
+        if len(articles) == 1 or len(best.get_text(" ")) > total * 0.5:
+            return best
+    return body
+
+
+def _drop_noise_blocks(root: Tag) -> None:
+    """Remove cookie banners, share bars, newsletter boxes, sidebars, ... by role / id / class.
+    A block holding most of the page text is never removed (a body class like 'has-sidebar')."""
+    total = len(root.get_text(" ")) or 1
+    for el in list(root.find_all(True)):
+        if getattr(el, "decomposed", False) or el.parent is None:
+            continue
+        if el.name in ("main", "article", "body", "html"):
+            continue
+        role = (el.get("role") or "").lower()
+        ident = " ".join([el.get("id") or "", *(el.get("class") or [])])
+        if role in _NOISE_ROLES or (ident and _NOISE_BLOCK.search(ident)):
+            if len(el.get_text(" ")) < total * 0.5:
+                el.decompose()
+
+
+def _is_junk_line(line: str) -> bool:
+    """URL-only lines, base64 / hash blobs and lines without a single letter."""
+    if re.fullmatch(r"(https?://|www\.)\S+", line):
+        return True
+    if len(line) > 40 and " " not in line and re.fullmatch(r"[A-Za-z0-9+/=_-]+", line):
+        return True
+    return not re.search(r"[^\W\d_]", line) and not re.search(r"\d", line)
+
+
+REPEAT_SHOW = 3     # repeated sibling blocks shown in full in the page outline
 
 
 def page_outline(html: str, max_chars: int = 12000) -> str:
@@ -198,21 +349,45 @@ def page_outline(html: str, max_chars: int = 12000) -> str:
     body = soup.body or soup
     out: list[str] = []
 
+    size = [0]
+
     def walk(el: Tag, depth: int) -> None:
-        if sum(len(x) for x in out) > max_chars or depth > 25:
+        if size[0] > max_chars or depth > 25:
             return
         if _is_hidden(el):
             return
+        kids = el.find_all(True, recursive=False)
         own = _norm("".join(t for t in el.find_all(string=True, recursive=False)))[:60]
         attrs = describe(el)["attrs"]
-        cls = el.get("class")
-        if cls:
-            attrs["class"] = " ".join(cls)[:50]
-        if own or attrs or _interactive(el):
-            a = " ".join(f'{k}="{v}"' for k, v in attrs.items())
-            out.append(f"{'  ' * min(depth, 12)}<{el.name}{' ' + a if a else ''}>{own}")
-        for child in el.find_all(True, recursive=False):
-            walk(child, depth + 1)
+        if attrs.get("href"):
+            attrs["href"] = short_url(attrs["href"])[:70]
+        if own and attrs.get("title", "").lower() == own.lower():
+            attrs.pop("title")
+        cls = clean_classes(el.get("class"), 2)
+        if cls and "id" not in attrs:
+            attrs["class"] = " ".join(cls)
+        # Plain wrappers (no text, no meaningful attrs, one child) add a line but no information.
+        meaningful = own or _interactive(el) or any(k != "class" for k in attrs) or (attrs and len(kids) > 1)
+        if meaningful:
+            a = " ".join(f'{_ATTR_SHORT.get(k, k)}="{v}"' for k, v in attrs.items())
+            line = f"{' ' * min(depth, 12)}<{el.name}{' ' + a if a else ''}>{own}"
+            out.append(line)
+            size[0] += len(line) + 1
+        # Repeated siblings (product cards, result rows, table rows): show the first few in full,
+        # then one summary line - enough to write a selector, a fraction of the tokens.
+        shown: Counter = Counter()
+        skipped: Counter = Counter()
+        for child in kids:
+            sig = (child.name, tuple(clean_classes(child.get("class"), 3)))
+            if len(kids) > REPEAT_SHOW and shown[sig] >= REPEAT_SHOW:
+                skipped[sig] += 1
+                continue
+            shown[sig] += 1
+            walk(child, depth + 1 if meaningful else depth)
+        for (tag, cls), n in skipped.items():
+            line = f"{' ' * min(depth + 1, 12)}... {n} more <{tag}{' class=' + chr(34) + ' '.join(cls) + chr(34) if cls else ''}> like above"
+            out.append(line)
+            size[0] += len(line) + 1
 
     walk(body, 0)
     return "\n".join(out)[:max_chars]
@@ -246,19 +421,27 @@ def _signature(el: Tag) -> str:
 
 
 def links(html: str, base_url: str) -> list[dict]:
+    """Page links (deduplicated by URL). Content links come first; links inside nav / header /
+    footer / aside follow, flagged chrome=True, so a cut-off list keeps the useful ones."""
     soup = soup_of(html)
     out, seen = [], set()
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
         if not href or href.startswith(("javascript:", "mailto:", "tel:", "#")):
             continue
-        url = urljoin(base_url, href)
+        url = urljoin(base_url, href).split("#")[0]
         text = _norm(a.get_text(" ")) or a.get("aria-label", "") or a.get("title", "")
         if url in seen or not text:
             continue
         seen.add(url)
-        out.append({"text": text[:100], "href": url, "sig": _signature(a)})
-    return out
+        chrome = a.find_parent(CHROME_TAGS) is not None
+        out.append({"text": text[:100], "href": url, "sig": _signature(a), "chrome": chrome})
+    return [l for l in out if not l["chrome"]] + [l for l in out if l["chrome"]]
+
+
+def links_for_prompt(items: list[dict], base_url: str = "") -> str:
+    """`[i] text -> /path` (own host and tracking params dropped)."""
+    return "\n".join(f"[{i}] {l['text'][:80]} -> {short_url(l['href'], base_url)[:90]}" for i, l in enumerate(items))
 
 
 # --------------------------------------------------------------------------- scraping helpers
@@ -289,17 +472,29 @@ def repeating_groups(html: str, top: int = 3, sample_chars: int = 2500) -> list[
 
 
 def compact_html(el: Tag, max_chars: int = 2500) -> str:
+    """A record block as short HTML for the PATTERN prompt: stable classes only, at most two
+    data-* attributes, short URLs, data: URIs and long text cut, whitespace collapsed."""
     el = BeautifulSoup(str(el), "html.parser")
     for t in el.find_all(True):
-        keep = {k: v for k, v in t.attrs.items()
-                if k in ("class", "href", "src", "id", "alt", "title", "aria-label") or k.startswith("data-")}
-        if "class" in keep:
-            keep["class"] = [c for c in keep["class"] if len(c) < 40][:4]
-        for k in list(keep):
-            if isinstance(keep[k], str) and len(keep[k]) > 120:
-                keep[k] = keep[k][:120]
+        keep, data_attrs = {}, 0
+        for k, v in t.attrs.items():
+            if k == "class":
+                cls = clean_classes(v, 3)
+                if cls:
+                    keep["class"] = cls
+            elif k in ("href", "src"):
+                v = str(v)
+                keep[k] = "data:..." if v.startswith("data:") else short_url(v)[:90]
+            elif k in ("id", "alt", "title", "aria-label", "itemprop"):
+                keep[k] = str(v)[:80]
+            elif k.startswith("data-") and data_attrs < 2 and len(str(v)) <= 60:
+                keep[k] = v
+                data_attrs += 1
         t.attrs = keep
-    s = re.sub(r"\s+", " ", str(el))
+    for s in el.find_all(string=True):
+        if len(s) > 200:
+            s.replace_with(s[:200] + "...")
+    s = re.sub(r">\s+<", "><", re.sub(r"\s+", " ", str(el)))
     return s[:max_chars]
 
 

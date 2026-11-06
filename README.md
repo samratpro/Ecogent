@@ -53,8 +53,9 @@ Click **Settings**:
   | Anthropic | `https://api.anthropic.com` | required |
 
   Press **Test connection / fetch models**, then choose a model from the list (or type it).
-- **Tiny local LLM** (optional) - e.g. Ollama `qwen2.5:1.5b`; tick the jobs it should handle
-  (`pick`, `classify`, ...) so cheap calls stay local.
+- **Cheap model** (optional, recommended) - a cheaper model from any provider (e.g. `gpt-4o-mini`,
+  a flash/haiku model, or a local server) for simple jobs. Ticked by default: `pick`, `validate`,
+  `analyze_map` (per-page notes), `classify`, `repair`. Planning and the final analysis stay on the main model.
 - **General** - temp / output / browser-profile folders, browser path (empty = auto-detect),
   headless or graphics mode by default.
 
@@ -89,6 +90,18 @@ python -m ecogent --chat <chat_id> "now export it as docx"     # follow-up in an
 
 Prints a JSON result (chat id, status, output file, token usage). Other agents can call
 `ecogent.integration.run_tool_call(...)` with the `TOOL_SCHEMA` (task type + intent).
+
+### Measure the token cost
+
+```bash
+python bench/benchmark.py --tasks bench/tasks.example.json --runs 5 --mode cached  --price-in 0.15 --price-out 0.60
+python bench/benchmark.py --tasks bench/tasks.example.json --runs 5 --mode nocache --price-in 0.15 --price-out 0.60
+```
+
+Uses the LLM from Settings and writes tokens, cached tokens and USD per run to `bench/results.csv`
+(`nocache` = every run is a new chat with no reuse: the baseline). Cost limits live in
+`ecogent_data/settings.json`: `max_run_tokens` (asks before a run goes over, default 150000),
+`max_heals_per_run` (default 6), `max_heal_attempts` (per step, default 2).
 
 ### Troubleshooting
 
@@ -134,11 +147,12 @@ folder if none is selected. They can only touch the chat, temp, output and selec
 | Module | Role |
 |---|---|
 | `core.py` | New chat, first plan, follow-ups (rerun / heal / extend / reanalyze), automation requirements |
-| `executor.py` | Runs steps; cached selector -> probable elements -> broader area -> page outline; self-healing; hold for user |
+| `executor.py` | Runs steps; cached selector (identity-checked) -> alternate locators -> local re-find -> obvious candidate, and only then the LLM (probable elements -> broader area -> page outline); bounded self-healing; per-run token budget; hold for user |
 | `scraping.py`, `analysis.py` | Pattern scraping and final analysis |
+| `relevance.py` | BM25 relevance filter: only goal-relevant page parts go to the analysis LLM |
 | `browser.py` | Wraps [playwright_browser_manager](https://github.com/samratpro/playwright_browser_manager) |
 | `page_reader.py` | BeautifulSoup candidates, cleaned page text, repeated blocks |
-| `llm.py`, `prompts.py` | Providers, main/local routing, token accounting, system prompts |
+| `llm.py`, `prompts.py` | Providers (retry/backoff, JSON mode, prompt caching), main/local routing, token accounting incl. cached tokens, system prompts |
 | `memory.py` | ChromaDB lookup of similar earlier plans (reuses their selectors) |
 | `scheduler.py`, `worker.py`, `bridge.py` | Periodic runs, worker thread, agent <-> GUI requests |
 | `integration.py` | Tool-call entry point for other agents (task type + intent) |

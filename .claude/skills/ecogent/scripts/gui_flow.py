@@ -18,7 +18,7 @@ def load():
     s = Settings(); s.home = str(OUT / "home"); s.use_vector_memory = False; s.headless = True; s.debug_port = 9241; s.main_llm.api_key = "x"; s.ensure_dirs(); return s
 Settings.load = staticmethod(load)
 from ecogent import llm as L, prompts as P
-def fake(self, system, messages, max_tokens=None):
+def fake(self, system, messages, max_tokens=None, json_mode=False):
     r = lambda o: L.LLMResponse(json.dumps(o), 500, 40, "fake", "fake")
     if P.INIT_SCHEMA in system:
         return r({"title": "Baby products", "summary": "s", "reply": "Plan ready.", "plan": {"goal": "baby under $50", "destination": {"start_url": B + "/products.html"},

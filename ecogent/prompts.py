@@ -5,36 +5,21 @@ returns plan.json / current_task.json in the exact structure the agent runs.
 
 from . import toolbox
 
-CORE = """You are the planner of ECOGENT, a token-efficient browser agent.
+CORE = """You are the planner of ECOGENT, a token-efficient browser agent. Python runs every step
+with Playwright and BeautifulSoup and caches the elements it finds, so reruns cost nothing.
+Keep step ids stable when revising a plan (same "id" for unchanged steps).
 
-HOW ECOGENT WORKS
-- Python executes every step deterministically with Playwright (browser control) and
-  BeautifulSoup (reading pages). You never see the browser directly.
-- You are called only when needed: to plan, to pick an element when the cached selector
-  is missing or invalid, to heal a failed step, and to analyze collected data.
-- Every chat owns these files:
-  * plan.json         - goal, destination, output spec, execution memory (cached selectors,
-                        validation elements), collected data files. Reused on later runs.
-  * current_task.json - the ordered list of steps that the agent executes.
-  * steps.json        - execution log (written by the agent, not by you).
-  * chat.json         - chat messages and a short state summary (memory).
-- Cached selectors make reruns nearly free, so KEEP STEP IDS STABLE when you revise a
-  plan: reuse the same "id" for steps that did not change.
-
-STEP FORMAT (one JSON object per step)
-{"id": "s1", "step_name": "short description", "tech": "playwright|beautifulsoup|llm|file",
- "action": "<action>", ...action fields..., "on_fail": "stop|skip",
- "validation": {"url_contains": "...", "text_contains": "..."}   (optional, checked after the step)}
-
-VALUES may use templates: {{item}} (current for_each item: link URL or file path),
-{{user.<field>}} (user info), {{<variable>}} (saved variables).
+STEP: {"id": "s1", "step_name": "<=5 words", "action": "<tool>", ...tool fields...}
+Optional, only when useful: "on_fail": "skip" (default stop), "validation": {"url_contains": "..."} or
+{"text_contains": "..."}. Omit empty or default fields.
+Templates: {{item}} (current for_each item), {{user.<field>}} (user info), {{<variable>}} (saved variable).
 
 RULES
-- Prefer direct URLs that already contain the query (e.g. https://scholar.google.com/scholar?q=browser+agent)
-  over typing into search boxes: fewer steps, fewer tokens.
-- Describe targets the way a human would see them ("the main search box", "Next page button").
+- Prefer direct URLs that contain the query (https://scholar.google.com/scholar?q=browser+agent) over
+  typing into search boxes.
+- Describe targets as a human sees them ("the main search box", "Next page button").
 - Use ask_user only where a human is truly required.
-- Reply with JSON only. No markdown, no prose outside the JSON.
+- Reply with compact JSON only: no markdown, no prose.
 """
 
 TYPE_GUIDES = {
@@ -67,20 +52,12 @@ Use whatever actions fit. Finish with analyze or write_output if the user expect
 }
 
 INIT_SCHEMA = """Return JSON:
-{
- "title": "short chat title",
- "summary": "1-3 sentence memory of what the user wants and the plan",
- "reply": "short message to the user",
- "plan": {
-   "goal": "...",
-   "destination": {"start_url": "...", "fallback_urls": [], "notes": "..."},
-   "output": {"format": "md|docx|json|csv|xlsx|txt", "filename": "name.ext", "instructions": "what the final output must contain"},
-   "success_criteria": ["..."],
-   "scrape": {"fields": [{"name": "...", "description": "..."}], "filters": [], "max_items": 200, "max_pages": 10},
-   "requirements": {"needs_login": false, "login_url": "", "profile_name": "", "user_info_fields": [], "schedule": null}
- },
- "current_task": [ ...steps... ]
-}
+{"title": "<=6 words", "summary": "1-2 sentence memory of the request and plan", "reply": "1 short sentence",
+ "plan": {"goal": "...", "destination": {"start_url": "..."},
+          "output": {"format": "md|docx|json|csv|xlsx|txt", "filename": "name.ext", "instructions": "what the output must contain"},
+          "scrape": {"fields": [{"name": "...", "description": "..."}], "filters": [], "max_items": 200, "max_pages": 10},
+          "requirements": {"needs_login": false, "login_url": "", "profile_name": "", "user_info_fields": [], "schedule": null}},
+ "current_task": [ ...steps... ]}
 Omit "scrape" unless scraping; omit "requirements" unless login/user info/schedule is needed."""
 
 FOLLOWUP_SCHEMA = """The user sent a follow-up in an existing chat. Decide the cheapest way to satisfy it.
@@ -90,12 +67,15 @@ Return JSON:
  "reply": "short message to the user",
  "summary": "updated 1-3 sentence memory",
  "plan_updates": { ...only the plan keys that change, e.g. "output" or "scrape"... },
- "current_task": [ ...full new step list, required for heal/extend, keep ids of unchanged steps... ],
+ "step_changes": {"replace": [ ...changed steps, same id... ], "insert_after": {"<step id or ^ for the start>": [ ...new steps... ]},
+                  "remove": ["<step id>", ...]},
  "analysis_instructions": "for reanalyze: what to change (format, depth, focus)",
  "reuse_notes": true
 }
 - rerun: same steps again (fresh data). Costs no planning tokens.
 - heal: steps need fixing; extend: different/more data needed (e.g. another category).
+  For heal/extend return ONLY step_changes (never repeat unchanged steps: they keep their cached
+  selectors). Only when nearly every step changes, return "current_task": [ ...full step list... ] instead.
 - reanalyze: the data already collected is enough; only the analysis/format changes.
   reuse_notes=false when deeper analysis of the sources is needed.
 - reply: just answer, nothing to execute."""
@@ -132,8 +112,8 @@ item_selector must select the whole record block (one per record), not an image 
 VALIDATE = """Check whether sample scraped records match what the user wants.
 Return JSON {"ok": true|false, "problems": "what is wrong and which field (empty if ok)"}."""
 
-ANALYZE_MAP = """Extract everything relevant to the goal from one source document.
-Write compact markdown notes: key facts, figures, names, dates, and the source URL. No filler."""
+ANALYZE_MAP = """Extract what is relevant to the goal from one source document.
+Write terse markdown bullets (at most 15): key facts, figures, names, dates, and the source URL. No filler."""
 
 ANALYZE_REDUCE = """Write the final deliverable from the collected notes/sources.
 Follow the requested format exactly and only output the deliverable itself."""
@@ -144,6 +124,19 @@ Return JSON {"rows": [{"column": "value", ...}, ...]} with consistent columns.""
 CLASSIFY = """Classify a browser-agent request into one task type:
 analysis, scraping, automation, others.
 Return JSON {"task_type": "...", "intent": "one sentence describing what the user wants"}."""
+
+
+HEAL_CONTEXT = """You repair one failed step of ECOGENT, a browser agent. Python runs each step with
+Playwright and finds elements from the step's "target" (a human description such as "the main search
+box"). Step format: {"id", "step_name", "action", ...action fields..., "on_fail": "stop|skip",
+"validation": {"url_contains": "...", "text_contains": "..."}}. Values may use {{item}}, {{user.<field>}},
+{{<variable>}}. Keep the step id. Reply with JSON only."""
+
+
+def heal_system(task_type: str) -> str:
+    """Short system prompt for healing: the step format and this type's tools, not the whole
+    planner prompt (a heal only fixes one step)."""
+    return "\n\n".join([HEAL_CONTEXT, toolbox.catalog(task_type), HEAL])
 
 
 def system(task_type: str, *parts: str) -> str:

@@ -180,9 +180,10 @@ class SettingsDialog(Dialog):
                 self.w["headless"] = dpg.add_checkbox(label="Headless mode by default (otherwise graphics mode)", default_value=settings.headless)
             with dpg.tab(label="Main LLM") as self.main_tab:
                 self.main = self._llm(settings.main_llm, ["openai", "openrouter", "ollama", "compatible", "anthropic"])
-            with dpg.tab(label="Tiny local LLM"):
-                self.local = self._llm(settings.local_llm, ["none", "ollama", "compatible", "openrouter", "openai"])
-                dpg.add_text("Jobs routed to the local model:")
+            with dpg.tab(label="Cheap model"):
+                self.local = self._llm(settings.local_llm, ["none", "openai", "openrouter", "anthropic", "compatible", "ollama"])
+                dpg.add_text("Simple jobs routed to a cheaper model (e.g. gpt-4o-mini, a flash/haiku model).")
+                dpg.add_text("Planning and the final analysis stay on the main model unless ticked here:")
                 self.purposes = {}
                 with dpg.group(horizontal=True):
                     for p in LLM_PURPOSES:
@@ -191,7 +192,10 @@ class SettingsDialog(Dialog):
                 for key, label in (("max_heal_attempts", "Max heal attempts per step"),
                                    ("scrape_sample_size", "Scraping sample size"),
                                    ("max_page_chars", "Max chars per page sent to LLM"),
-                                   ("analysis_direct_chars", "Analyze in one call up to (chars)")):
+                                   ("analysis_direct_chars", "Analyze in one call up to (chars)"),
+                                   ("analysis_budget_chars", "Relevance filter: page text for analysis (chars, 0 = off)"),
+                                   ("max_heals_per_run", "Max LLM heals per run"),
+                                   ("max_run_tokens", "Token budget per run (0 = unlimited)")):
                     self.w[key] = dpg.add_input_int(label=label, default_value=getattr(settings, key), width=160)
                 self.w["use_vector_memory"] = dpg.add_checkbox(label="Use ChromaDB vector memory to reuse similar plans",
                                                                default_value=settings.use_vector_memory)
@@ -276,7 +280,8 @@ class SettingsDialog(Dialog):
         for key in ("home", "temp_dir", "output_dir", "profile_dir", "browser_path"):
             data[key] = dpg.get_value(self.w[key]).strip()
         for key in ("debug_port", "page_timeout_ms", "max_heal_attempts", "scrape_sample_size",
-                    "max_page_chars", "analysis_direct_chars", "headless", "use_vector_memory"):
+                    "max_page_chars", "analysis_direct_chars", "analysis_budget_chars", "max_heals_per_run",
+                    "max_run_tokens", "headless", "use_vector_memory"):
             data[key] = dpg.get_value(self.w[key])
         if not data["home"]:
             dpg.set_value(self.err, "Home folder is required.")

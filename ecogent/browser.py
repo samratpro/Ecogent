@@ -168,6 +168,22 @@ class BrowserSession:
         except Exception:
             return ""
 
+    def describe(self, selector: str) -> dict:
+        """{"tag", "text", "attrs"} of the first visible match - the element's identity, stored next
+        to a cached selector so a rerun can check (and re-find) it without the LLM."""
+        try:
+            return self.page.locator(selector).first.evaluate(
+                """el => {
+                    const keep = ["id", "name", "type", "placeholder", "aria-label", "title", "role",
+                                  "href", "alt", "data-testid"];
+                    const attrs = {};
+                    for (const k of keep) { const v = el.getAttribute(k); if (v) attrs[k] = v.slice(0, 80); }
+                    const text = (el.innerText || el.value || "").replace(/\\s+/g, " ").trim().slice(0, 80);
+                    return {tag: el.tagName.toLowerCase(), text, attrs};
+                }""", timeout=2000) or {}
+        except Exception:
+            return {}
+
     def click(self, selector: str) -> None:
         before = len(self.page.context.pages)
         loc = self.page.locator(selector).first

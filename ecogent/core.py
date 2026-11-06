@@ -10,12 +10,14 @@ Flow (how_work.md):
 from __future__ import annotations
 
 import json
+import re
 import threading
 from datetime import date
+from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import urlparse
 
-from . import prompts
+from . import output, prompts
 from .analysis import AnalysisEngine
 from .bridge import UIBridge
 from .browser import BrowserError, BrowserSession
@@ -43,6 +45,68 @@ def normalize_steps(steps: list, prefix: str = "s") -> list:
             st["steps"] = normalize_steps(st["steps"], prefix=f"{sid}_")
         out.append(st)
     return out
+
+
+# ---- follow-ups answered without an LLM call
+FORMAT_WORDS = {"docx": "docx", "word": "docx", "md": "md", "markdown": "md", "csv": "csv", "excel": "xlsx",
+                "xlsx": "xlsx", "spreadsheet": "xlsx", "json": "json", "txt": "txt"}
+FORMAT_FILLER = {"give", "me", "the", "same", "as", "a", "an", "in", "into", "to", "it", "this", "that", "please",
+                 "pls", "now", "convert", "export", "save", "file", "document", "doc", "format", "output", "version",
+                 "data", "result", "results", "report", "can", "could", "would", "you", "i", "want", "need", "also",
+                 "send", "make", "create", "get", "of", "one", "copy", "instead", "thanks", "thank", "just", "but",
+                 "like", "for", "and", "too", "file", "type"}
+RERUN_TRIGGERS = {"run", "rerun", "again", "repeat", "refresh"}
+RERUN_WORDS = RERUN_TRIGGERS | {"it", "the", "task", "same", "please", "pls", "once", "more", "now", "with", "fresh",
+                                "data", "one", "time", "do", "this", "that", "can", "you", "and"}
+
+
+def apply_step_changes(steps: list, changes: dict) -> list:
+    """Apply a follow-up patch {"replace": [...], "insert_after": {id|"^": [...]}, "remove": [...]}.
+    Unchanged steps keep their ids (and with them their cached selectors); new steps get ids
+    that cannot collide with existing ones."""
+    def all_ids(items: list) -> set:
+        out = set()
+        for st in items:
+            if isinstance(st, dict):
+                out.add(str(st.get("id")))
+                out |= all_ids(st.get("steps") or [])
+        return out
+
+    used = all_ids(steps)
+    counter = [0]
+
+    def fresh(st: dict) -> dict:
+        st = dict(st)
+        if not st.get("id") or (str(st["id"]) in used and st.get("_new", True)):
+            counter[0] += 1
+            while f"n{counter[0]}" in used:
+                counter[0] += 1
+            st["id"] = f"n{counter[0]}"
+        used.add(str(st["id"]))
+        st.pop("_new", None)
+        return st
+
+    replace = {str(st.get("id")): st for st in (changes.get("replace") or []) if isinstance(st, dict) and st.get("id")}
+    remove = {str(x) for x in (changes.get("remove") or [])}
+    inserts = {str(k): [fresh(st) for st in v if isinstance(st, dict)]
+               for k, v in (changes.get("insert_after") or {}).items() if isinstance(v, list)}
+
+    def walk(items: list) -> list:
+        out = []
+        for st in items:
+            if not isinstance(st, dict):
+                continue
+            sid = str(st.get("id"))
+            if sid in remove:
+                continue
+            new = {**st, **replace[sid], "id": st.get("id")} if sid in replace else dict(st)
+            if isinstance(new.get("steps"), list):
+                new["steps"] = walk(new["steps"])
+            out.append(new)
+            out.extend(inserts.get(sid, []))
+        return out
+
+    return inserts.get("^", []) + walk(steps)
 
 
 def _host(url: str) -> str:
@@ -82,9 +146,10 @@ class EcogentAgent:
 
     def router(self, s: ChatSession) -> LLMRouter:
         def on_usage(purpose, resp):
-            s.add_usage(purpose, resp.provider, resp.model, resp.input_tokens, resp.output_tokens)
+            s.add_usage(purpose, resp.provider, resp.model, resp.input_tokens, resp.output_tokens,
+                        getattr(resp, "cached_input_tokens", 0), getattr(resp, "cache_write_tokens", 0))
             self.ui.emit("usage", s.id)
-        return LLMRouter(self.settings, on_usage)
+        return LLMRouter(self.settings, on_usage, log=lambda t: self.ui.log(t, s.id))
 
     def say(self, s: ChatSession, text: str) -> None:
         s.add_message("agent", text)
@@ -205,8 +270,9 @@ class EcogentAgent:
             o = old.get(st["id"])
             if o and o.get("action") == st.get("action") and o.get("target") == st.get("target"):
                 for key, rec in old_exec.items():
-                    if key == st["id"] or key.startswith(st["id"] + "."):
-                        new_exec[key] = {k: v for k, v in rec.items() if k in ("selector", "fingerprint", "link_signatures", "page")}
+                    if key == st["id"] or key.startswith((st["id"] + ".", st["id"] + "@")):
+                        new_exec[key] = {k: v for k, v in rec.items()
+                                         if k in (*Executor.MEMORY_FIELDS, "link_signatures")}
                         copied += 1
         if rp.get("pattern") and plan.get("task_type") == "scraping":
             plan["pattern"] = {**rp["pattern"], "confirmed": False}
@@ -304,11 +370,57 @@ class EcogentAgent:
         self.execute(s, s.current_task, reset_data=True, scheduled=scheduled)
 
     # ------------------------------------------------------------------ follow-ups
+    def _local_follow_up(self, s: ChatSession, text: str) -> bool:
+        """Follow-ups that need no LLM call: "run it again" and "same as docx/csv/...".
+        Returns True when handled."""
+        words = re.findall(r"[a-z]+", text.lower())
+        if not words or len(words) > 14:
+            return False
+        if set(words) <= RERUN_WORDS and set(words) & RERUN_TRIGGERS:
+            self.say(s, "Running the task again with the saved plan.")
+            self.rerun(s.id)
+            return True
+        formats = {FORMAT_WORDS[w] for w in words if w in FORMAT_WORDS}
+        rest = [w for w in words if w not in FORMAT_WORDS and w not in FORMAT_FILLER]
+        if len(formats) != 1 or rest:
+            return False
+        fmt = formats.pop()
+        plan = s.plan
+        data = plan.get("data", {})
+        old_out = Path(data.get("output_file") or "")
+        if not data.get("records_file") and not (data.get("output_file") and old_out.exists()):
+            return False
+        plan.setdefault("output", {})["format"] = fmt
+        s.save_plan(plan)
+        ex = self.executor(s)
+        try:
+            if data.get("records_file"):
+                path = ex.write_output()                  # scraped records in a new format
+            elif old_out.suffix.lower() in (".md", ".txt") and fmt in ("md", "txt", "docx"):
+                text_out = old_out.read_text(encoding="utf-8", errors="replace")
+                out = ex.plan.get("output", {})
+                path = output.write_text(text_out, output.output_path(s.output_dir, out.get("filename", "analysis"), fmt))
+                ex.data()["output_file"] = str(path)
+                ex.save_plan()
+            else:
+                # Needs a new layout (e.g. md -> table): analysis, but no follow-up planning call.
+                self.reanalyze(s, f"Same content, delivered as {fmt}.", reuse_notes=True)
+                return True
+        except (StepFailed, OSError) as e:
+            self.ui.log(f"Local format change failed ({e}); asking the LLM", s.id)
+            return False
+        s.update_meta(status="done")
+        self.say(s, f"Converted without the LLM: {path}")
+        self.ui.emit("files", s.id)
+        return True
+
     def follow_up(self, s: ChatSession, text: str) -> None:
+        if self._local_follow_up(s, text):
+            return
         plan, steps = s.plan, s.current_task
         ttype = s.meta.get("task_type", "others")
         exec_status = {k: {"status": v.get("status"), "error": v.get("error", "")[:120]}
-                       for k, v in plan.get("execution", {}).get("steps", {}).items()}
+                       for k, v in plan.get("execution", {}).get("steps", {}).items() if v.get("status")}
         data = plan.get("data", {})
         collected = {"data_files": [f.get("title", "")[:80] for f in data.get("temp_files", [])],
                      "records_count": data.get("records_count"), "output_file": data.get("output_file")}
@@ -345,7 +457,12 @@ class EcogentAgent:
         if decision == "rerun":
             self.execute(s, s.current_task, reset_data=True)
         elif decision in ("heal", "extend"):
-            new_steps = normalize_steps(ans.get("current_task") or [])
+            if ans.get("current_task"):
+                new_steps = normalize_steps(ans["current_task"])
+            elif isinstance(ans.get("step_changes"), dict):
+                new_steps = apply_step_changes(s.current_task, ans["step_changes"])
+            else:
+                new_steps = []
             if not new_steps:
                 self.say(s, "The planner returned no steps; running the existing ones.")
                 new_steps = s.current_task

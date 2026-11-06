@@ -22,3 +22,6 @@ Ecogent_Thesis_Proposal_Draft.zip
 .idea/
 .DS_Store
 Thumbs.db
+
+# Benchmark output
+bench/results*.csv

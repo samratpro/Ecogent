@@ -66,7 +66,7 @@ GROUP_TITLES = {
     "browser": "Browser (Playwright)",
     "page": "Page data (BeautifulSoup)",
     "flow": "Flow",
-    "file": "Local files (paths are relative to the selected folder, else the output folder)",
+    "file": "Local files (paths relative to the selected folder, else the output folder)",
     "output": "Results",
 }
 
@@ -81,13 +81,14 @@ def allowed(name: str, task_type: str) -> bool:
 
 
 def catalog(task_type: str) -> str:
-    """Tool list for the system prompt, only the tools of this task type."""
-    lines = [f"TOOLS available for this task (use only these as \"action\"):"]
+    """Tool list for the system prompt, only the tools of this task type, one compact line each
+    (no column padding: whitespace is billed too)."""
+    lines = ['TOOLS (use only these as "action"):']
     tools = tools_for(task_type)
     for group, title in GROUP_TITLES.items():
         items = [t for t in tools if t.group == group]
         if not items:
             continue
         lines.append(f"[{title}]")
-        lines += [f"- {t.name:<15}{t.params:<32} {t.desc}" for t in items]
+        lines += [f"- {t.name}({t.params}): {t.desc}" for t in items]
     return "\n".join(lines)

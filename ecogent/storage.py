@@ -190,17 +190,24 @@ class ChatSession:
             c["summary"] = summary
             write_json(self.chat_path, c)
 
-    def add_usage(self, purpose: str, provider: str, model: str, tin: int, tout: int) -> None:
+    def add_usage(self, purpose: str, provider: str, model: str, tin: int, tout: int,
+                  cached: int = 0, cache_write: int = 0) -> None:
+        """tin includes cached input tokens; cached / cache_write are the parts of tin that were
+        read from / written to the provider's prompt cache (priced differently)."""
         with _lock:
             c = self.chat
             u = c.setdefault("usage", {"calls": 0, "input_tokens": 0, "output_tokens": 0, "by_purpose": {}})
             u["calls"] = u.get("calls", 0) + 1
             u["input_tokens"] = u.get("input_tokens", 0) + tin
             u["output_tokens"] = u.get("output_tokens", 0) + tout
+            u["cached_input_tokens"] = u.get("cached_input_tokens", 0) + cached
+            u["cache_write_tokens"] = u.get("cache_write_tokens", 0) + cache_write
             p = u.setdefault("by_purpose", {}).setdefault(purpose, {"calls": 0, "input_tokens": 0, "output_tokens": 0})
             p["calls"] += 1
             p["input_tokens"] += tin
             p["output_tokens"] += tout
+            p["cached_input_tokens"] = p.get("cached_input_tokens", 0) + cached
+            p["cache_write_tokens"] = p.get("cache_write_tokens", 0) + cache_write
             p["model"] = f"{provider}:{model}"
             write_json(self.chat_path, c)
 

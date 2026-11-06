@@ -22,6 +22,8 @@ Here is detail explain how Ecogent works:-
 
 ```
 Ecogent is a browser agent that target to reduce token cost by reusing previous and using some technique
+
+Ecogent is a browser agent whose LLM usage decreases with reuse. We contribute (a) a fallback ladder for finding elements that uses as few tokens as possible, (b) plans that carry validation elements so only the broken steps get healed, and (c) reuse policies for each task type. On a benchmark of repeated tasks with deliberate site changes, we measure dollar cost, tokens and success rate over N runs against browser-use, a no-cache baseline and an AWM-style baseline.
 ```
 
 ### How initialized new task/chat:

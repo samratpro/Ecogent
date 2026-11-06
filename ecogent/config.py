@@ -25,8 +25,11 @@ TASK_LABELS = {
     "others": "Others",
 }
 
-# Which LLM jobs may be routed to the tiny local model (when one is configured).
-LLM_PURPOSES = ["plan", "followup", "pick", "locate", "heal", "pattern", "validate", "analyze", "classify"]
+# LLM jobs that may be routed to the cheap model (when one is configured). Simple, short jobs
+# suit a small/cheap model; planning and the final analysis stay on the main model by default.
+LLM_PURPOSES = ["plan", "followup", "pick", "locate", "heal", "pattern", "validate", "analyze_map", "analyze",
+                "classify", "repair"]
+CHEAP_PURPOSES_DEFAULT = ["pick", "validate", "analyze_map", "classify", "repair"]
 
 
 # Provider presets. All except "anthropic" speak the OpenAI-compatible /chat/completions API.
@@ -56,8 +59,9 @@ class LLMConfig:
 
 
 def _local_llm_default() -> LLMConfig:
-    # Ollama / LM Studio expose an OpenAI-compatible API.
-    return LLMConfig(provider="none", base_url=PROVIDERS["ollama"]["base_url"], model="qwen2.5:1.5b", max_tokens=1024)
+    # The "cheap model" slot: any provider (e.g. gpt-4o-mini, a flash model, or a local server).
+    # Off until a provider is chosen in Settings.
+    return LLMConfig(provider="none", base_url=PROVIDERS["openai"]["base_url"], model="gpt-4o-mini", max_tokens=1024)
 
 
 @dataclass
@@ -71,12 +75,16 @@ class Settings:
     debug_port: int = 9231
     page_timeout_ms: int = 45000
     main_llm: LLMConfig = field(default_factory=LLMConfig)
+    # Cheap model (JSON keys kept as local_* for existing settings files).
     local_llm: LLMConfig = field(default_factory=_local_llm_default)
-    local_purposes: list = field(default_factory=lambda: ["pick", "classify"])
-    max_heal_attempts: int = 2
+    local_purposes: list = field(default_factory=lambda: list(CHEAP_PURPOSES_DEFAULT))
+    max_heal_attempts: int = 2        # per step
+    max_heals_per_run: int = 6        # across all steps / for_each items of one run
+    max_run_tokens: int = 150000      # per-run token budget; asks before going over (0 = unlimited)
     scrape_sample_size: int = 15
     max_page_chars: int = 12000
     analysis_direct_chars: int = 30000
+    analysis_budget_chars: int = 24000   # relevance filter: max chars of page text sent to analysis (0 = off)
     use_vector_memory: bool = True
 
     # ------------------------------------------------------------------ paths

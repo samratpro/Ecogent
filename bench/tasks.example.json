@@ -1,0 +1,8 @@
+[
+  {"name": "scholar-browser-agents", "type": "analysis",
+   "prompt": "Search Google Scholar for papers on browser agents and give me a summarized md file of the top 5"},
+  {"name": "books-under-20", "type": "scraping",
+   "prompt": "Visit https://books.toscrape.com and scrape title, price and url of all books under 20 pounds from the first 3 pages"},
+  {"name": "quotes-einstein", "type": "scraping",
+   "prompt": "Go to https://quotes.toscrape.com and scrape every quote by Albert Einstein with its tags"}
+]

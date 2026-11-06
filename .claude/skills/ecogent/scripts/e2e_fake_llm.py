@@ -1,16 +1,23 @@
 """
 End-to-end test of the agent (no GUI) with a scripted fake LLM and a real headless browser.
-Covers: analysis (+rerun cache hits, follow-up reanalyze to docx), scraping (+0-call rerun),
-automation (user info template, for_each dedupe, write_output), software_test placeholder.
+Covers: analysis (local picks, 0-call rerun via the analysis cache, local docx conversion, LLM
+follow-up, selector drift healed without the LLM, token budget), scraping (+0-call rerun),
+automation (user info template, for_each dedupe, write_output), software_test placeholder,
+plus unit checks of JSON repair, follow-up patches and page compaction.
 
 Usage (from repo root):
   PYTHONPATH="$PWD" .venv/Scripts/python .claude/skills/ecogent/scripts/e2e_fake_llm.py       .claude/skills/ecogent/site "<scratch dir>/home"
 Prints "ALL OK" on success. Serves the site on 127.0.0.1:8765.
 """
-import functools, http.server, json, re, sys, threading, os
+import functools, http.server, json, re, shutil, sys, threading, os
 from pathlib import Path
-SITE = Path(sys.argv[1]); HOME = Path(sys.argv[2]); WORK = HOME.parent / "work_folder"
-srv = http.server.ThreadingHTTPServer(("127.0.0.1", 8765), functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(SITE)))
+HOME = Path(sys.argv[2]); WORK = HOME.parent / "work_folder"
+SITE = HOME.parent / "site_copy"            # a copy: the drift test edits pages
+shutil.rmtree(SITE, ignore_errors=True); shutil.copytree(sys.argv[1], SITE)
+class NoCache(http.server.SimpleHTTPRequestHandler):
+    def end_headers(self):                       # the drift test edits pages between runs
+        self.send_header("Cache-Control", "no-store"); super().end_headers()
+srv = http.server.ThreadingHTTPServer(("127.0.0.1", 8765), functools.partial(NoCache, directory=str(SITE)))
 srv.RequestHandlerClass.log_message = lambda *a: None
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 B = "http://127.0.0.1:8765"
@@ -21,7 +28,7 @@ from ecogent.bridge import HeadlessBridge
 from ecogent.core import EcogentAgent
 
 CALLS = []
-def fake_complete(self, system, messages, max_tokens=None):
+def fake_complete(self, system, messages, max_tokens=None, json_mode=False):
     user = messages[-1]["content"]
     def r(obj): return L.LLMResponse(obj if isinstance(obj, str) else json.dumps(obj), len(system+user)//4, 50, "fake", "fake")
     if P.HEAL in system:
@@ -97,6 +104,42 @@ def fake_complete(self, system, messages, max_tokens=None):
     raise AssertionError("unexpected prompt: " + system[:80])
 L.LLMClient.complete = fake_complete
 
+# ---- unit checks (no browser)
+assert L.extract_json('{"a": [1, 2, {"b": "cut') == {"a": [1, 2, {"b": "cut"}]}          # truncated reply
+assert L.extract_json("Sure! {'index': 2, 'ok': True,}") == {"index": 2, "ok": True}    # python-ish
+from ecogent.core import apply_step_changes
+old = [{"id": "s1", "action": "open_url"}, {"id": "s2", "action": "click", "target": "a"},
+       {"id": "s3", "action": "for_each", "steps": [{"id": "x", "action": "open_url"}]}]
+new = apply_step_changes(old, {"replace": [{"id": "s2", "target": "b"}], "remove": ["x"],
+                               "insert_after": {"s1": [{"action": "wait"}, {"id": "s3", "action": "scroll"}], "^": [{"action": "wait"}]}})
+assert [s["id"] for s in new] == ["n3", "s1", "n1", "n2", "s2", "s3"], new
+assert new[4]["target"] == "b" and new[4]["action"] == "click" and new[5]["steps"] == []
+from ecogent import page_reader as pr
+html = ('<html><body><div class="css-1x2y3z wrapper"><div><div><nav><a href="/x">Menu</a></nav>'
+        '<div class="cookie-banner">We use cookies. Accept all</div>'
+        '<main><h1>Title</h1><p>Real content line that matters here.</p><a href="http://h.com/p?utm_source=x&id=7">Paper</a>'
+        '<button class="Ab12Cd34">Search</button></main></div></div></div></body></html>')
+outline = pr.page_outline(html)
+assert "css-1x2y3z" not in outline and "Ab12Cd34" not in outline, outline
+_, text = pr.main_text(html)
+assert "cookies" not in text and "Real content" in text, text
+assert pr.short_url("http://h.com/p?utm_source=x&id=7", "http://h.com/") == "/p?id=7"
+c = pr.candidates(html, "click", "Search button", 1)
+assert pr.obvious_choice(c, "click")["text"] == "Search", c
+from ecogent import relevance as R
+NL = chr(10)
+filler = NL.join(f"Paragraph {i} about cooking recipes, gardening tips and travel stories." for i in range(200))
+key = "Captcha challenges block scraping bots; courts debate the legal status of scraping."
+docs, st = R.select([filler[:6000] + NL + key + NL + filler[6000:]], "legal issues of scraping and captcha bots", 3000)
+assert st["after"] <= 3200 and key in docs[0], st          # relevant paragraph survives a 4x cut
+assert R.select(["short"], "x", 3000)[0] == ["short"]       # within budget: untouched
+from ecogent.llm import LLMRouter
+cs = Settings(); cs.local_llm.provider = "compatible"; cs.local_llm.base_url = "http://x"
+rt = LLMRouter(cs)
+assert rt._client_for("pick") is rt.local and rt._client_for("analyze_map") is rt.local
+assert rt._client_for("plan") is rt.main and rt._client_for("analyze") is rt.main
+print("UNIT OK")
+
 s = Settings(); s.home = str(HOME); s.headless = True; s.use_vector_memory = False; s.main_llm.api_key = "x"; s.ensure_dirs()
 agent = EcogentAgent(s, HeadlessBridge(lambda t: print("  |", t)))
 try:
@@ -104,19 +147,47 @@ try:
     a = agent.new_chat("analysis", headless=True)
     agent.handle_message(a.id, "Search papers about browser agents and summarize to md")
     a = agent.session(a.id)
-    print("ANALYSIS status:", a.meta["status"], "calls:", CALLS)
+    print("ANALYSIS status:", a.meta["status"], "calls:", CALLS, "stats:", a.plan["runs"][-1]["stats"])
+    assert "pick" not in CALLS and a.plan["runs"][-1]["stats"]["local_picks"] == 2, CALLS   # obvious elements
     out = a.plan["data"]["output_file"]; print("output:", out, "->", Path(out).read_text()[:60].replace("\n"," | "))
     assert len(a.plan["data"]["temp_files"]) == 3
     CALLS.clear()
     agent.rerun(a.id)
     a = agent.session(a.id)
     print("RERUN status:", a.meta["status"], "calls:", CALLS, "stats:", a.plan["runs"][-1]["stats"])
-    assert CALLS == ["analyze"], CALLS
+    assert CALLS == [], CALLS          # same sources + same request: analysis reused
     CALLS.clear()
     agent.handle_message(a.id, "give me the same as a Word document")
     a = agent.session(a.id)
-    print("FOLLOWUP calls:", CALLS, "output:", a.plan["data"]["output_file"])
-    assert a.plan["data"]["output_file"].endswith(".docx")
+    print("FOLLOWUP (local) calls:", CALLS, "output:", a.plan["data"]["output_file"])
+    assert CALLS == [] and a.plan["data"]["output_file"].endswith(".docx"), CALLS
+    CALLS.clear()
+    agent.handle_message(a.id, "focus more on token efficiency of each paper")
+    a = agent.session(a.id)
+    print("FOLLOWUP (LLM) calls:", CALLS)
+    assert CALLS == ["followup", "analyze"], CALLS
+    # ---- selector drift: the page layout changes; elements are re-found without the LLM
+    page = SITE / "search.html"
+    page.write_text(page.read_text().replace('<form', '<div class="top"><input type="text" name="email" '
+        'placeholder="Your email"></div><div class="wrap"><form').replace('</form>', '</form></div>'))
+    CALLS.clear(); agent.rerun(a.id); a = agent.session(a.id); st = a.plan["runs"][-1]["stats"]
+    print("DRIFT RERUN calls:", CALLS, "stats:", st)
+    assert a.meta["status"] == "done" and CALLS == [] and st["local_heals"] >= 1, (CALLS, st)
+    page.write_text(page.read_text().replace(">Search</button>", ">Go</button>"))
+    CALLS.clear(); agent.rerun(a.id); a = agent.session(a.id); st = a.plan["runs"][-1]["stats"]
+    print("DRIFT 2 (button text changed) calls:", CALLS, "stats:", st)
+    assert a.meta["status"] == "done" and CALLS == [], (CALLS, st)
+    CALLS.clear(); agent.handle_message(a.id, "run it again")
+    print("RERUN (local follow-up) calls:", CALLS)
+    assert CALLS == [] and agent.session(a.id).meta["status"] == "done"
+    # ---- token budget: headless cannot approve more, so the run stops before the next LLM call
+    s.max_run_tokens = 1
+    b = agent.new_chat("analysis", headless=True)
+    CALLS.clear(); agent.handle_message(b.id, "Collect web agent studies; md")
+    b = agent.session(b.id)
+    print("BUDGET status:", b.meta["status"], "calls:", CALLS)
+    assert b.meta["status"] == "failed" and len(CALLS) == 2 and "analyze" not in CALLS, CALLS  # plan + 1 call, then stop
+    s.max_run_tokens = 150000
     # ---- scraping
     CALLS.clear()
     sc = agent.new_chat("scraping", headless=True)
