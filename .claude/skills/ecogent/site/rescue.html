@@ -1,0 +1,12 @@
+<!doctype html>
+<html><head><title>Verify</title></head>
+<body>
+<h1>Verify your account</h1>
+<!-- The code box is hidden until "Show form" is clicked: a plan step "fill the code box"
+     cannot succeed on its own (ReAct fallback test). -->
+<button id="toggle" onclick="document.getElementById('box').style.display='block'">Show form</button>
+<div id="box" style="display:none">
+  <input name="code" placeholder="Verification code">
+  <button id="send" onclick="document.title='Sent'">Send</button>
+</div>
+</body></html>

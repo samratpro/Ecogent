@@ -36,19 +36,23 @@ def apply_pattern(pattern: dict, html: str, base_url: str) -> list[dict]:
             f = f if isinstance(f, dict) else {"selector": str(f), "attr": "text"}
             sel, attr = f.get("selector") or "", f.get("attr") or "text"
             try:
-                el = it.select_one(sel) if sel else it
+                els = (it.select(sel) if f.get("many") else [it.select_one(sel)]) if sel else [it]
             except Exception:
-                el = None
-            if el is None:
-                val = ""
-            elif attr == "text":
-                val = pr._norm(el.get_text(" "))
-            else:
-                v = el.get(attr, "")
-                val = " ".join(v) if isinstance(v, list) else str(v)
-                if attr in ("href", "src") and val:
-                    val = urljoin(base_url, val)
-            row[name] = val
+                els = []
+            vals = []
+            for el in els:
+                if el is None:
+                    continue
+                if attr == "text":
+                    val = pr._norm(el.get_text(" "))
+                else:
+                    v = el.get(attr, "")
+                    val = " ".join(v) if isinstance(v, list) else str(v)
+                    if attr in ("href", "src") and val:
+                        val = urljoin(base_url, val)
+                if val:
+                    vals.append(val)
+            row[name] = ", ".join(vals)     # "many" fields (tags, authors) keep every value
         if any(row.values()):
             rows.append(row)
     return rows
@@ -136,7 +140,8 @@ class ScrapeEngine:
                 continue
             filtered = apply_filters(rows, self.spec.get("filters", []))
             sample = (filtered or rows)[: ex.settings.scrape_sample_size]
-            verdict = self.validate(sample) if llm_rejects < 2 else {"ok": True}
+            unfiltered = bool(self.spec.get("filters")) and not filtered
+            verdict = self.validate(sample, unfiltered) if llm_rejects < 2 else {"ok": True}
             if not verdict.get("ok", True) and ex.pattern_calls < budget:
                 llm_rejects += 1
                 feedback = verdict.get("problems", "sample does not match the request")
@@ -217,13 +222,15 @@ class ScrapeEngine:
         ans = self.ex.llm.ask_json("pattern", prompts.PATTERN, "\n".join(msg), max_tokens=1200)
         return ans if isinstance(ans, dict) else {}
 
-    def validate(self, sample: list[dict]) -> dict:
-        trimmed = [{k: str(v)[:120] for k, v in r.items()} for r in sample[:8]]
+    def validate(self, sample: list[dict], unfiltered: bool = False) -> dict:
+        trimmed = [{k: (str(v)[:120] + "…" if len(str(v)) > 120 else str(v)) for k, v in r.items()} for r in sample[:8]]
+        note = ("No record on this page passes the filters, so this sample is UNFILTERED: judge only whether the "
+                "fields are extracted correctly, not the filter.\n") if unfiltered else ""
         try:
             ans = self.ex.llm.ask_json(
                 "validate", prompts.VALIDATE,
                 f"Goal: {self.ex.plan.get('goal', '')}\nFields: {json.dumps(self.spec.get('fields', []))}\n"
-                f"Filters: {json.dumps(self.spec.get('filters', []))}\nSample:\n{json.dumps(trimmed, ensure_ascii=False)}",
+                f"Filters: {json.dumps(self.spec.get('filters', []))}\n{note}Sample:\n{json.dumps(trimmed, ensure_ascii=False)}",
                 max_tokens=300)
             return ans if isinstance(ans, dict) else {"ok": True}
         except Exception as e:
@@ -235,10 +242,11 @@ class ScrapeEngine:
         ex, b = self.ex, self.ex.browser
         max_items = int(self.spec.get("max_items") or 200)
         max_pages = int(self.spec.get("max_pages") or 10)
-        records, seen = [], set()
+        records, seen, seen_all = [], set(), set()
         for page_no in range(1, max_pages + 1):
             ex.check_stop()
-            rows = apply_filters(apply_pattern(pattern, b.html(), b.url), self.spec.get("filters", []))
+            raw = apply_pattern(pattern, b.html(), b.url)
+            rows = apply_filters(raw, self.spec.get("filters", []))
             new = 0
             for r in rows:
                 k = json.dumps(r, sort_keys=True)
@@ -246,21 +254,59 @@ class ScrapeEngine:
                     seen.add(k)
                     records.append(r)
                     new += 1
+            # "Pages ran out" is judged on ALL records, not the filtered ones: a page where every
+            # item fails the filter (all over $50) must not stop the scrape before later pages.
+            fresh = 0
+            for r in raw:
+                k = json.dumps(r, sort_keys=True)
+                if k not in seen_all:
+                    seen_all.add(k)
+                    fresh += 1
             ex.ui.emit("status", ex.chat_id, text=f"Scraping page {page_no}: {len(records)} records")
             self.log(f"Page {page_no}: {new} new records (total {len(records)})")
-            if len(records) >= max_items or (page_no > 1 and new == 0):
+            if len(records) >= max_items or (page_no > 1 and fresh == 0):
                 break
             mode, sel = pattern.get("pagination", "none"), pattern.get("next_selector") or ""
+            if mode == "none" and max_pages > 1 and pr.next_page_candidates(b.html()):
+                # The user asked for several pages and the page has a Next link: follow it even if
+                # the pattern said "none" (models often miss it).
+                mode = "next"
+            if mode == "next" and (not sel or not b.exists(sel)):
+                # The stored selector may name one page ('a[href="page-2.html"]') and be gone on the
+                # next page: find this page's own Next link locally (rel=next, "Next", class next).
+                for c in pr.next_page_candidates(b.html()):
+                    if b.exists(c["selector"]):
+                        if sel:
+                            self.log(f"Stored next-page selector not on page {page_no}; using {c['selector']}")
+                        sel = c["selector"]
+                        break
             if mode == "scroll":
                 b.scroll(3)
+                self._wait_for_new(pattern, raw)
             elif mode == "next" and sel and b.exists(sel):
                 try:
                     b.click(sel)
                 except Exception as e:
                     self.log(f"Next page failed: {e}")
                     break
+                self._wait_for_new(pattern, raw)
                 if pr.detect_blocker(b.html()) and not ex.ui.hold(ex.chat_id, "Captcha on the next page. Solve it, then Continue."):
                     break
             else:
                 break
         return records[:max_items]
+
+    def _wait_for_new(self, pattern: dict, before: list[dict], timeout_s: float = 6.0) -> None:
+        """After Next / scroll, wait until the records differ from the last page: JS-driven
+        pagination updates the list after the click returns, and reading too early would end
+        the scrape (no new records). Plain page loads pass at the first check."""
+        b = self.ex.browser
+        old = json.dumps(before[:5], sort_keys=True)
+        old_n = len(before)
+        waited = 0.0
+        while waited < timeout_s:
+            now = apply_pattern(pattern, b.html(), b.url)
+            if json.dumps(now[:5], sort_keys=True) != old or len(now) != old_n:
+                return
+            b.page.wait_for_timeout(500)
+            waited += 0.5

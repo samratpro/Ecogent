@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+from typing import Optional
 import re
 from pathlib import Path
 
@@ -22,9 +23,10 @@ def output_path(folder: Path, filename: str, fmt: str) -> Path:
     return Path(folder) / f"{stem}.{fmt}"
 
 
-def write_rows(rows: list[dict], path: Path) -> Path:
+def write_rows(rows: list[dict], path: Path, columns: Optional[list[str]] = None) -> Path:
+    """columns: header to use even when rows is empty (a scrape where nothing matched)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    columns: list[str] = []
+    columns = list(columns or [])
     for r in rows:
         for k in r:
             if k not in columns:

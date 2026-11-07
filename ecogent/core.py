@@ -9,6 +9,7 @@ Flow (how_work.md):
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 import threading
@@ -17,14 +18,14 @@ from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import urlparse
 
-from . import output, prompts
+from . import output, prompts, toolbox
 from .analysis import AnalysisEngine
 from .bridge import UIBridge
 from .browser import BrowserError, BrowserSession
 from .config import NOT_IMPLEMENTED_TYPES, TASK_LABELS, TASK_TYPES, Settings
 from .executor import Executor, StepFailed, StopRequested
 from .llm import LLMError, LLMRouter
-from .memory import PlanMemory, compact_plan_reference
+from .memory import PlanMemory, compact_plan_reference, normalize_request
 from .scheduler import validate_rule
 from .storage import ChatSession, now_iso, open_session, slugify
 
@@ -107,6 +108,76 @@ def apply_step_changes(steps: list, changes: dict) -> list:
         return out
 
     return inserts.get("^", []) + walk(steps)
+
+
+REUSE_PLAN_KEYS = ("goal", "destination", "output", "scrape", "requirements")
+
+
+def _find_steps(ans: dict) -> list:
+    """The step list wherever the model put it: top-level "current_task" (the schema), or nested
+    in "plan" / named "steps" (small models do both). A nested copy is removed from the plan."""
+    plan = ans.get("plan") if isinstance(ans.get("plan"), dict) else {}
+    for holder, key in ((ans, "current_task"), (plan, "current_task"), (ans, "steps"), (plan, "steps")):
+        v = holder.get(key)
+        if isinstance(v, list) and v and all(isinstance(x, dict) for x in v):
+            if holder is plan:
+                plan.pop(key, None)
+            return v
+    return []
+
+
+def _all_actions(steps: list) -> list:
+    out = []
+    for st in steps or []:
+        if isinstance(st, dict):
+            out.append(st.get("action"))
+            out += _all_actions(st.get("steps") or [])
+    return out
+
+
+PAGE_ACTIONS = {"fill", "click", "press", "select_option", "scroll", "wait", "screenshot", "download", "upload",
+                "get_page_data", "collect_links", "extract_records"}
+
+
+def ensure_start(steps: list, plan: dict, log=None) -> None:
+    """A plan that acts on a page before opening one (small models skip the open_url when the
+    start URL is already in plan.destination) would type into about:blank: open it first."""
+    start = ((plan or {}).get("destination") or {}).get("start_url", "")
+    for st in steps:
+        if not isinstance(st, dict):
+            continue
+        if st.get("action") == "open_url":
+            return
+        if st.get("action") in PAGE_ACTIONS:
+            if start:
+                used = {str(x.get("id")) for x in steps if isinstance(x, dict)}
+                sid = "s0"
+                while sid in used:
+                    sid += "_"
+                steps.insert(0, {"id": sid, "step_name": "Open start page", "action": "open_url", "url": start})
+                if log:
+                    log(f"Plan acted on a page before opening one; added open_url {start} (no LLM)")
+            return
+
+
+def ensure_deliverable(steps: list, task_type: str, log=None) -> None:
+    """A plan must end in its deliverable: scraping writes the records, analysis analyzes.
+    Small models sometimes stop after extract_records / get_page_data; add the step for free."""
+    actions = _all_actions(steps)
+    add = None
+    if task_type == "scraping" and "extract_records" in actions and "write_output" not in actions:
+        add = {"step_name": "Write output file", "action": "write_output"}
+    elif task_type == "analysis" and "analyze" not in actions and \
+            any(a in actions for a in ("get_page_data", "read_file", "for_each")):
+        add = {"step_name": "Analyze collected data", "action": "analyze"}
+    if add:
+        used = {str(st.get("id")) for st in steps if isinstance(st, dict)}
+        n = len(steps) + 1
+        while f"s{n}" in used:
+            n += 1
+        steps.append({"id": f"s{n}", **add})
+        if log:
+            log(f"Plan had no '{add['action']}' step; added it (no LLM)")
 
 
 def _host(url: str) -> str:
@@ -206,48 +277,115 @@ class EcogentAgent:
             self.ui.emit("chats", s.id)
 
     # ------------------------------------------------------------------ first plan
+    def _exact_reference(self, s: ChatSession, ttype: str, text: str) -> Optional[ChatSession]:
+        """An earlier chat with the SAME request that finished fine, in the same folder/profile.
+        Its plan can be reused as is: no planning call at all."""
+        today = date.today().isoformat()
+        for cid in self.memory.exact(ttype, text, exclude=s.id):
+            ref = open_session(self.settings, cid)
+            if not ref or not ref.current_task or ref.meta.get("status") != "done":
+                continue
+            if normalize_request(ref.plan.get("request", "")) != normalize_request(text):
+                continue
+            if any((ref.meta.get(k) or "") != (s.meta.get(k) or "") for k in ("work_folder", "profile")):
+                continue
+            plan_keys, steps = self._reusable_plan(ref)
+            if not steps:
+                continue
+            # A plan that baked in the day it was made ("news of 2026-11-01") is not reusable later.
+            created = str(ref.plan.get("created", ""))[:10]
+            if created and created != today and created in json.dumps([steps, plan_keys]):
+                continue
+            return ref
+        return None
+
+    @staticmethod
+    def _reusable_plan(ref: ChatSession) -> tuple[dict, list]:
+        """What the earlier request itself produced. Follow-ups ("as docx", "another category")
+        change the plan for that chat only, so then the origin snapshot is reused; run-time heals
+        (no follow-up) are kept, they are fixes for the same request."""
+        if ref.plan.get("changed_by_followup"):
+            origin = ref.plan.get("origin") or {}
+            return copy.deepcopy(origin.get("plan") or {}), copy.deepcopy(origin.get("steps") or [])
+        return (copy.deepcopy({k: ref.plan[k] for k in REUSE_PLAN_KEYS if k in ref.plan}),
+                copy.deepcopy(ref.current_task))
+
     def initialize(self, s: ChatSession, text: str) -> None:
         meta = s.meta
         ttype = meta.get("task_type", "others")
-        ref_session = None
-        reference = ""
+        ref_session, exact = None, False
+        ref_plan, ref_steps, reference = {}, [], ""
         try:
-            hit = self.memory.similar(ttype, text, exclude=s.id)
-            if hit and hit[1] >= 0.75:
-                ref_session = open_session(self.settings, hit[0])
-                if ref_session and ref_session.current_task:
-                    reference = compact_plan_reference(ref_session.plan, ref_session.current_task)
-                    self.ui.log(f"Reusing a similar earlier plan ({hit[0]}, similarity {hit[1]:.2f})", s.id)
-                else:
-                    ref_session = None
+            ref_session = self._exact_reference(s, ttype, text)
+            exact = ref_session is not None
+            if exact:
+                self.ui.log(f"Same request as {ref_session.id}: reusing its plan without a planning call", s.id)
+            else:
+                hit = self.memory.similar(ttype, text, exclude=s.id)
+                if hit and hit[1] >= 0.75:
+                    ref_session = open_session(self.settings, hit[0])
+                    if ref_session and ref_session.current_task:
+                        ref_plan, ref_steps = self._reusable_plan(ref_session)
+                        if not ref_steps:
+                            ref_plan = {k: ref_session.plan[k] for k in REUSE_PLAN_KEYS if k in ref_session.plan}
+                            ref_steps = copy.deepcopy(ref_session.current_task)
+                        reference = compact_plan_reference(ref_plan, ref_steps)
+                        self.ui.log(f"Reusing a similar earlier plan ({hit[0]}, similarity {hit[1]:.2f})", s.id)
+                    else:
+                        ref_session = None
         except Exception as e:
+            ref_session, exact = None, False
             self.ui.log(f"Memory lookup skipped: {e}", s.id)
 
-        self.ui.emit("status", s.id, text="Planning with LLM...")
-        system = prompts.system(ttype, prompts.INIT_SCHEMA)
-        user = (f"Task type: {ttype}\nToday: {date.today().isoformat()}\nUser request: {text}\n"
-                f"Known user info fields: {list(s.user_info().keys())}\n"
-                f"Selected folder for file tools: {meta.get('work_folder') or 'none (output folder)'}\n"
-                f"Browser profile in use: {meta.get('profile') or 'none (fresh temporary profile)'}")
-        if reference:
-            user += ("\n\nA similar task was solved before. Reuse or adapt it and keep the same step ids "
-                     f"for unchanged steps:\n{reference}")
-        ans = self.router(s).ask_json("plan", system, user, max_tokens=4000)
-        if not isinstance(ans, dict) or not isinstance(ans.get("current_task"), list) or not ans["current_task"]:
-            raise LLMError("planner did not return a current_task list")
+        if exact:
+            ans = {"title": ref_session.meta.get("title"), "summary": ref_session.chat.get("summary", ""),
+                   "reply": "Same request as an earlier chat: reusing its plan (no planning tokens)."}
+            plan, steps = self._reusable_plan(ref_session)
+        else:
+            self.ui.emit("status", s.id, text="Planning with LLM...")
+            system = prompts.system(ttype, prompts.INIT_SCHEMA)
+            user = (f"Task type: {ttype}\nToday: {date.today().isoformat()}\nUser request: {text}\n"
+                    f"Known user info fields: {list(s.user_info().keys())}\n"
+                    f"Selected folder for file tools: {meta.get('work_folder') or 'none (output folder)'}\n"
+                    f"Browser profile in use: {meta.get('profile') or 'none (fresh temporary profile)'}")
+            if reference:
+                user += f"\n\n{prompts.ADAPT_HINT}\n{reference}"
+            ans = self.router(s).ask_json("plan", system, user, max_tokens=4000)
+            ans = ans if isinstance(ans, dict) else {}
+            found = _find_steps(ans)
+            if found:
+                plan = ans.get("plan") if isinstance(ans.get("plan"), dict) else {}
+                steps = normalize_steps(found)
+            elif reference and ("step_changes" in ans or "plan_updates" in ans):
+                # Patch of the earlier plan: far fewer output tokens than a full plan, and unchanged
+                # steps keep their ids, so their cached selectors carry over.
+                plan = copy.deepcopy(ref_plan)
+                updates = ans.get("plan_updates") if isinstance(ans.get("plan_updates"), dict) else {}
+                for k, v in updates.items():
+                    plan[k] = {**plan[k], **v} if isinstance(plan.get(k), dict) and isinstance(v, dict) else v
+                changes = ans.get("step_changes") if isinstance(ans.get("step_changes"), dict) else {}
+                steps = normalize_steps(apply_step_changes(copy.deepcopy(ref_steps), changes))
+                self.ui.log(f"Adapted the earlier plan with a patch (plan keys changed: {list(updates) or 'none'})", s.id)
+            else:
+                steps = []
+            if not steps:
+                raise LLMError("planner did not return a current_task list")
+            toolbox.repair_steps(steps, ttype, lambda t: self.ui.log(t, s.id))
+            ensure_deliverable(steps, ttype, lambda t: self.ui.log(t, s.id))
+            ensure_start(steps, plan, lambda t: self.ui.log(t, s.id))
 
-        plan = ans.get("plan") or {}
         plan.update(task_type=ttype, request=text, created=now_iso())
-        steps = normalize_steps(ans["current_task"])
+        plan["origin"] = copy.deepcopy({"plan": {k: plan[k] for k in REUSE_PLAN_KEYS if k in plan}, "steps": steps})
         if ref_session:
-            self._inherit_memory(plan, steps, ref_session)
+            self._inherit_memory(plan, steps, ref_session,
+                                 keep_pattern=exact and not ref_session.plan.get("changed_by_followup"))
         s.save_plan(plan)
         s.save_task(steps)
         s.set_summary(ans.get("summary", ""))
         s.update_meta(title=ans.get("title") or meta.get("title"), status="planned")
         self.say(s, ans.get("reply") or f"Plan ready: {len(steps)} steps.")
         try:
-            self.memory.add(s.id, ttype, f"{text}\n{plan.get('goal', '')}")
+            self.memory.add(s.id, ttype, f"{text}\n{plan.get('goal', '')}", request=text)
         except Exception:
             pass
         self.ui.emit("files", s.id)
@@ -258,8 +396,10 @@ class EcogentAgent:
             return
         self.execute(s, steps, reset_data=True)
 
-    def _inherit_memory(self, plan: dict, steps: list, ref: ChatSession) -> None:
-        """Copy cached selectors/patterns from a similar earlier chat (same site, same step)."""
+    def _inherit_memory(self, plan: dict, steps: list, ref: ChatSession, keep_pattern: bool = False) -> None:
+        """Copy cached selectors/patterns from a similar earlier chat (same site, same step).
+        keep_pattern: same request, so a pattern the user confirmed stays confirmed (it is still
+        checked against the page before use)."""
         rp, old = ref.plan, {st.get("id"): st for st in ref.current_task}
         if _host(plan.get("destination", {}).get("start_url", "")) != _host(rp.get("destination", {}).get("start_url", "")):
             return
@@ -272,10 +412,11 @@ class EcogentAgent:
                 for key, rec in old_exec.items():
                     if key == st["id"] or key.startswith((st["id"] + ".", st["id"] + "@")):
                         new_exec[key] = {k: v for k, v in rec.items()
-                                         if k in (*Executor.MEMORY_FIELDS, "link_signatures")}
+                                         if k in (*Executor.MEMORY_FIELDS, "link_signatures", "link_hrefs", "link_count")}
                         copied += 1
         if rp.get("pattern") and plan.get("task_type") == "scraping":
-            plan["pattern"] = {**rp["pattern"], "confirmed": False}
+            plan["pattern"] = copy.deepcopy({**rp["pattern"],
+                                             "confirmed": bool(keep_pattern and rp["pattern"].get("confirmed"))})
         if copied:
             self.ui.log(f"Inherited {copied} cached selectors from {ref.id}", ref.id)
 
@@ -317,8 +458,13 @@ class EcogentAgent:
         status, detail = "done", ""
         try:
             stats = ex.run(steps, reset_data=reset_data)
-            status = "done" if not stats.steps_failed else "partial"
+            status = "done" if not (stats.steps_failed or stats.items_failed) else "partial"
             detail = stats.line()
+            if status == "done" and s.meta.get("task_type") in ("analysis", "scraping") \
+                    and not ex.plan.get("data", {}).get("output_file"):
+                # Every step "worked" but the deliverable is missing: not a reusable success.
+                status = "partial"
+                detail += " | finished without an output file"
         except StopRequested as e:
             status, detail = "stopped", str(e)
         except StepFailed as e:
@@ -367,6 +513,15 @@ class EcogentAgent:
             return
         if not scheduled and not self.prepare_requirements(s):
             return
+        if scheduled and (s.plan.get("requirements") or {}).get("needs_login"):
+            # No login dialogs in a scheduled run: a missing profile can only fail, so fail early.
+            profile = s.meta.get("profile", "")
+            if not profile or profile not in self.browser.list_profiles():
+                s.update_meta(status="failed", last_run=now_iso())
+                self.say(s, f"Scheduled run skipped: the login profile '{profile or '?'}' is missing. "
+                            "Press Run once to log in again.")
+                self.ui.emit("chats", s.id)
+                return
         self.execute(s, s.current_task, reset_data=True, scheduled=scheduled)
 
     # ------------------------------------------------------------------ follow-ups
@@ -391,6 +546,7 @@ class EcogentAgent:
         if not data.get("records_file") and not (data.get("output_file") and old_out.exists()):
             return False
         plan.setdefault("output", {})["format"] = fmt
+        plan["changed_by_followup"] = True
         s.save_plan(plan)
         ex = self.executor(s)
         try:
@@ -440,8 +596,13 @@ class EcogentAgent:
         decision = ans.get("decision", "reply")
 
         s.set_summary(ans.get("summary", ""))
+        if decision in ("heal", "extend") and not s.plan.get("changed_by_followup"):
+            plan = s.plan
+            plan["changed_by_followup"] = True        # steps will change: keep the origin for exact reuse
+            s.save_plan(plan)
         if isinstance(ans.get("plan_updates"), dict) and ans["plan_updates"]:
             plan = s.plan
+            plan["changed_by_followup"] = True
             for k, v in ans["plan_updates"].items():
                 plan[k] = {**plan[k], **v} if isinstance(plan.get(k), dict) and isinstance(v, dict) else v
             if decision == "extend" and ("scrape" in ans["plan_updates"] or "destination" in ans["plan_updates"]):
@@ -457,8 +618,8 @@ class EcogentAgent:
         if decision == "rerun":
             self.execute(s, s.current_task, reset_data=True)
         elif decision in ("heal", "extend"):
-            if ans.get("current_task"):
-                new_steps = normalize_steps(ans["current_task"])
+            if _find_steps(ans):
+                new_steps = normalize_steps(_find_steps(ans))
             elif isinstance(ans.get("step_changes"), dict):
                 new_steps = apply_step_changes(s.current_task, ans["step_changes"])
             else:
@@ -466,6 +627,9 @@ class EcogentAgent:
             if not new_steps:
                 self.say(s, "The planner returned no steps; running the existing ones.")
                 new_steps = s.current_task
+            toolbox.repair_steps(new_steps, ttype, lambda t: self.ui.log(t, s.id))
+            ensure_deliverable(new_steps, ttype, lambda t: self.ui.log(t, s.id))
+            ensure_start(new_steps, s.plan, lambda t: self.ui.log(t, s.id))
             s.save_task(new_steps)
             self.ui.emit("files", s.id)
             if self.prepare_requirements(s):

@@ -10,10 +10,16 @@ from __future__ import annotations
 
 import difflib
 import json
+import re
 from pathlib import Path
 from typing import Callable, Optional
 
 from .storage import read_json, write_json
+
+
+def normalize_request(text: str) -> str:
+    """Request text for exact-repeat matching: case, spacing and punctuation ignored."""
+    return " ".join(re.findall(r"[a-z0-9$£€%.]+", (text or "").lower())).strip(" .")
 
 
 class PlanMemory:
@@ -29,9 +35,9 @@ class PlanMemory:
             except Exception as e:
                 self.log(f"Vector memory unavailable ({e}); using fuzzy matching")
 
-    def add(self, chat_id: str, task_type: str, text: str) -> None:
+    def add(self, chat_id: str, task_type: str, text: str, request: str = "") -> None:
         index = read_json(self.index_file, {})
-        index[chat_id] = {"task_type": task_type, "text": text}
+        index[chat_id] = {"task_type": task_type, "text": text, "request": request}
         write_json(self.index_file, index)
         if self._col is not None:
             try:
@@ -48,6 +54,21 @@ class PlanMemory:
                 self._col.delete(ids=[chat_id])
             except Exception:
                 pass
+
+    def exact(self, task_type: str, request: str, exclude: str = "") -> list[str]:
+        """Chats of this type with the same request (case/punctuation ignored), newest first."""
+        want = normalize_request(request)
+        if not want:
+            return []
+        out = []
+        for cid, item in read_json(self.index_file, {}).items():
+            if cid == exclude or item.get("task_type") != task_type:
+                continue
+            # Entries written before "request" was stored: text is "<request>\n<goal>".
+            req = item.get("request") or item.get("text", "").rsplit("\n", 1)[0]
+            if normalize_request(req) == want:
+                out.append(cid)
+        return out[::-1]
 
     def similar(self, task_type: str, text: str, exclude: str = "") -> Optional[tuple[str, float]]:
         """Return (chat_id, similarity 0..1) of the closest earlier task of the same type."""

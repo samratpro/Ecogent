@@ -92,16 +92,21 @@ class AnalysisEngine:
         ex.log(f"Final output written: {final}")
         return final
 
+    def _cache_dir(self) -> Path:
+        """Shared by all chats: entries are keyed by a hash of the exact prompt / page text, so the
+        same request over the same sources in a NEW chat reuses the deliverable too."""
+        d = Path(self.ex.settings.home_path) / "cache" / "analysis"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
     def _final_cache(self, system: str, user: str, ext: str) -> Path:
-        notes_dir = self.ex.session.ensure_temp() / "notes"
-        notes_dir.mkdir(exist_ok=True)
+        notes_dir = self._cache_dir()
         key = hashlib.sha1(f"{system}|{user}".encode("utf-8", "replace")).hexdigest()[:16]
         return notes_dir / f"final_{key}.{ext}"
 
     def _notes(self, f: dict, text: str, focus: str) -> str:
         ex = self.ex
-        notes_dir = ex.session.ensure_temp() / "notes"
-        notes_dir.mkdir(exist_ok=True)
+        notes_dir = self._cache_dir()
         # Content hash: changed pages get fresh notes, unchanged pages reuse notes for free.
         key = hashlib.sha1(f"{text}|{focus}".encode("utf-8", "replace")).hexdigest()[:16]
         cache = notes_dir / f"{key}.md"

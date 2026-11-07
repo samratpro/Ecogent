@@ -17,19 +17,19 @@ path is a regression - check the tests and the cost rules below.
 ## Architecture (`ecogent/`)
 | File | Role |
 |---|---|
-| `core.py` | `EcogentAgent`: `new_chat`, `initialize` (LLM -> plan + current_task; similar earlier plan via `memory`, `_inherit_memory` copies element memory), `follow_up` (`_local_follow_up` first: "run it again" / "same as docx" with no LLM; else LLM decision rerun/heal/extend/reanalyze/reply, heal/extend return a `step_changes` patch applied by `apply_step_changes`), `prepare_requirements`, `execute`, `rerun`, `reanalyze`, schedule offer |
-| `executor.py` | Runs steps (see "Element lookup"). Heal loop (short `prompts.heal_system`; `max_heal_attempts` per step, `max_heals_per_run`), per-run token budget (`_budget_check` hooked into `LLMRouter.before_call`, asks via `ui.confirm`, headless stops with `BudgetExceeded`), `NeedsUser` -> `ui.hold`, `for_each` with dedupe, `collect_links` with link-signature cache, `write_output`. `steps.json` tokens are per step, nested steps excluded (`_tok_frames`) |
-| `scraping.py` | Programmatic pattern: `repeating_groups` -> `PATTERN` -> apply -> free `local_problems` checks -> `VALIDATE` -> user sample confirm -> paginate. Confirmed pattern + fill rates in `plan["pattern"]`; reruns reuse it with 0 calls |
+| `core.py` | `EcogentAgent`: `new_chat`, `initialize` (same request as a finished chat -> `_exact_reference` reuses its plan with NO planning call; similar request (>=0.75) -> planner gets `prompts.ADAPT_HINT` + reference and may answer with a `plan_updates`/`step_changes` patch; else full plan. `_inherit_memory` copies element memory. `plan["origin"]` = what the request itself produced; follow-ups that change the plan set `plan["changed_by_followup"]`, and then reuse starts from `origin`), `follow_up` (`_local_follow_up` first: "run it again" / "same as docx" with no LLM; else LLM decision rerun/heal/extend/reanalyze/reply, heal/extend return a `step_changes` patch applied by `apply_step_changes`), `prepare_requirements`, `execute`, `rerun`, `reanalyze`, schedule offer |
+| `executor.py` | Runs steps (see "Element lookup"). Heal loop (short `prompts.heal_system`; `max_heal_attempts` per step, `max_heals_per_run`), then the bounded ReAct fallback `_rescue` (purpose `rescue`, prompt `RESCUE`: up to `max_rescue_turns` moves on one step, `max_rescues_per_run`, only click/fill/press/select_option/wait steps without `on_fail: skip`; each turn = step + moves so far + 30 element lines; the step's own value is used for its own action; on success the element is remembered and helper moves are inserted as `optional` prep steps `<id>_r<n>` - an optional step never calls the LLM, it raises `NoHeal` and is skipped), per-run token budget (`_budget_check` hooked into `LLMRouter.before_call`, asks via `ui.confirm`, headless stops with `BudgetExceeded`), `NeedsUser` -> `ui.hold`, `for_each` with dedupe (first `LOOP_FAIL_FAST`=3 items all failing -> `NoHeal`, loop stopped; any failed item -> run status `partial`), `_check_session` (needs_login tasks: redirected to a login form -> `NeedsUser`, see `pr.detect_login_wall`), `collect_links` with link-signature cache (first run offers `pr.links_to_offer`: menu + repeated-text links cut while >= 2x limit remain, max 80; a rerun whose remembered link shapes match < half of `link_count` picks again), `write_output`. `steps.json` tokens are per step, nested steps excluded (`_tok_frames`) |
+| `scraping.py` | Programmatic pattern: `repeating_groups` -> `PATTERN` -> apply -> free `local_problems` checks -> `VALIDATE` -> user sample confirm -> paginate. Confirmed pattern + fill rates in `plan["pattern"]`; reruns reuse it with 0 calls. `scrape_all` stops on pages with no new UNFILTERED records (a fully filtered page does not end it) and `_wait_for_new` waits for JS pagination |
 | `analysis.py` | `relevance.select` (BM25 filter to `analysis_budget_chars`) -> one direct call, or map (`analyze_map`, notes cached in temp/notes) + reduce. Final deliverable cached by hash of prompt (`_final_cache`): unchanged sources + request = 0 calls. Tables via `ANALYZE_ROWS` |
 | `relevance.py` | Pure-Python BM25: `select(texts, goal, budget)` keeps the best paragraph chunks per source (fair shares, first chunk kept, page order kept) |
 | `page_reader.py` | BeautifulSoup only, and the token diet: `candidates` (+ `score`, deduped) / `candidates_for_prompt` (compact `<tag k=v> text` lines), `obvious_choice`, `css_selector`, `main_text` (`_content_root`, noise blocks/lines removed), `page_outline` (hashed classes dropped, wrappers skipped, repeated siblings collapsed after `REPEAT_SHOW`), `links` (content first, `chrome` flag) / `links_for_prompt`, `short_url`, `clean_classes`, `compact_html`, `repeating_groups`, `detect_blocker` |
-| `browser.py` | Wraps `playwright_browser_manager.BrowserManager` (sync Playwright, shared instance). `describe(selector)` returns the element identity `{tag, text, attrs}` |
+| `browser.py` | Wraps `playwright_browser_manager.BrowserManager` (sync Playwright, shared instance). `describe(selector)` returns the element identity `{tag, text, attrs}`; `visible_many` (batch visibility); element actions use `action_timeout` (<=10s, page loads keep `page_timeout_ms`) |
 | `llm.py` | HTTP clients (OpenAI-compatible `/chat/completions`, Anthropic `/v1/messages`): retry/backoff on 429/5xx/network, JSON mode (auto-off if the server rejects it), cacheable system prompt, usage incl. `cached_input_tokens`. `LLMRouter`: main vs cheap model by purpose, `:fallback` purpose when the cheap model fails, `before_call` hook, `ask_json` -> free `_repair` -> cheap `repair` call (broken reply only) |
 | `prompts.py` | All prompts/schemas. `system(type, ...)` = terse `CORE` + `toolbox.catalog(type)` + type guide; `heal_system(type)` is the short heal prompt |
 | `toolbox.py` / `tools.py` | Tool registry (per task type, compact `catalog`) / sandboxed built-in file operations |
 | `config.py` | `Settings`, `PROVIDERS`, `LLM_PURPOSES`, `CHEAP_PURPOSES_DEFAULT`, `NOT_IMPLEMENTED_TYPES` |
 | `storage.py` | `ChatSession`: `<home>/chats/<id>/` plan.json, current_task.json, steps.json, chat.json (usage by purpose incl. cached tokens), user_info.json |
-| `memory.py` | ChromaDB (fallback difflib) similar-plan lookup; `compact_plan_reference` |
+| `memory.py` | ChromaDB (fallback difflib) similar-plan lookup; `exact` (same normalized request via `normalize_request`, index stores `request`); `compact_plan_reference` |
 | `bridge.py` | `UIBridge` events + blocking requests (hold, confirm, sample, user_info, choose); `HeadlessBridge` never blocks (confirm -> None) |
 | `worker.py` / `scheduler.py` | Single worker thread job queue; schedules.json periodic runs |
 | `integration.py` / `__main__.py` | Tool-call entry (task_type + intent), CLI; no args = GUI |
@@ -42,9 +42,31 @@ path is a regression - check the tests and the cost rules below.
 2. Stored `alternates` (id / test-id / name / aria-label / placeholder / `tag:text-is()`), same check.
 3. `_local_refind`: score page candidates against the remembered element (`_match_score`), only a clear winner.
 4. `pr.obvious_choice`: the only fitting candidate, or a strong, well-ahead score.
-5. LLM: `PICK` level 1 (15 candidates) -> level 2 (60) -> `LOCATE` with `page_outline`.
+   Every candidate list (lookup, local re-find, heal, rescue) first goes through `Executor._visible`
+   (`browser.visible_many`: one JS call, Playwright's visibility rule) - soup cannot see CSS-hidden elements.
+5. LLM: `PICK` level 1 (15 candidates) -> level 2 (60) -> `LOCATE` with `pr.focus_outline` (target-matching
+   lines + ancestors, <=3000 chars) -> `LOCATE` with the full `page_outline`. Only the full view may raise `NeedsUser`.
 Memory lives in `plan.execution.steps[<key>]` (`MEMORY_FIELDS`); a templated target (`{{item}}`) uses
 `<key>@<hash of rendered target>`. Stats: `cache_hits`, `local_heals`, `local_picks`, `llm_lookups`, `healed`.
+
+## Small-model guards (found with real gpt-4o-mini runs, all free)
+- `core._find_steps`: steps nested in `plan` or named `steps` are accepted.
+- `toolbox.guess` / `repair_steps`: wrong action names ("Browser", "Page data", "Results", "open url") mapped
+  to real tools at plan time and in `Executor.dispatch`. `catalog` is a flat list (group headings were used as actions).
+- `core.ensure_deliverable`: adds a missing `write_output` (scraping) / `analyze` (analysis) step.
+- Heal may not change the action of `Executor.KEEP_ACTION` steps; a run with no output file is `partial`
+  (never reused); `_reset_data` clears `output_file` and, except for automation, dedupe `processed`.
+- Scraping: `many` fields join all matches (tags); `pagination: none` is overridden when max_pages > 1 and a
+  Next link exists; `next_page_candidates` handles "Next →" and `li.next > a`; validator sees cut values as "…".
+- `collect_links` also stores `link_hrefs` (exact links); analysis cache is shared in `<home>/cache/analysis`.
+- `open_url` checks the HTTP status; on 4xx/5xx `_find_by_link` opens the site root and takes the clear best link
+  (path similarity + words), saving the URL into the step (guessed deep URLs). Templated URLs are not rewritten.
+- A model's "need user" (PICK/LOCATE/rescue/heal ask_user) only pauses when `_human_wall()` sees a captcha or
+  login form; otherwise the element counts as not found (heal / ReAct fallback continue).
+- `core.ensure_start` inserts `open_url <destination.start_url>` when a plan acts on a page before opening one.
+- `collect_links`: PICK_LINKS returning [] falls back to `pr.result_group` (one clear repeated content-link group).
+- Scraping with 0 matching records writes a header-only file; the validator is told when its sample is unfiltered.
+- Every run starts without `output_file`. Real-LLM runs: visible browser, the user solves captchas (popup).
 
 ## Cost rules (check every change against these)
 - Reruns must make 0 LLM calls for scraping/automation and for analysis with unchanged sources.
@@ -57,7 +79,7 @@ Memory lives in `plan.execution.steps[<key>]` (`MEMORY_FIELDS`); a templated tar
 - Any new LLM path must pass through `LLMRouter.ask/ask_json` (usage accounting, budget, retries).
 
 ## Settings that affect cost (`ecogent_data/settings.json`, Advanced tab)
-`max_heal_attempts` (2/step), `max_heals_per_run` (6), `max_run_tokens` (150000, 0 = off),
+`max_heal_attempts` (2/step), `max_heals_per_run` (6), `max_rescue_turns` (3, 0 = off), `max_rescues_per_run` (2), `max_run_tokens` (150000, 0 = off),
 `analysis_budget_chars` (24000, 0 = off), `analysis_direct_chars` (30000), `max_page_chars` (12000),
 `scrape_sample_size` (15). Cheap model = `local_llm` + `local_purposes` (JSON keys kept for old files;
 provider "none" = off, then everything goes to the main model).
@@ -96,9 +118,13 @@ From the repo root, with `PYTHONPATH="$PWD"`:
 1. `.venv/Scripts/python -m compileall -q ecogent bench`
 2. `.venv/Scripts/python .claude/skills/ecogent/scripts/e2e_fake_llm.py .claude/skills/ecogent/site <scratch>/home`
    -> must print `UNIT OK` and `ALL OK`. Expected call lists:
-   - analysis first run `['plan', 'links', 'analyze']` (no `pick`: 2 local picks); RERUN, DRIFT, DRIFT 2,
+   - scraping finds 6 records (site page 2 has no match, page 3 does); analysis first run `['plan', 'links', 'analyze']` (no `pick`: 2 local picks); RERUN, DRIFT, DRIFT 2,
      "run it again" and "same as a Word document" -> `[]`; LLM follow-up -> `['followup', 'analyze']`
    - BUDGET -> status failed after `plan` + one call; scraping/automation reruns -> `[]`
+   - EXACT REPEAT (same request, new chat) -> `[]` (shared analysis cache), output `.md` (origin plan, not the docx follow-up);
+     PATCHED PLAN -> `['plan', 'analyze']`; SCRAPE EXACT REPEAT -> `[]`
+   - RESCUE (`site/rescue.html`, hidden code box) -> `['plan','pick','locate','heal','rescue','rescue']` (the hidden box is filtered out, never offered), plan gets `s2_r1`;
+     RESCUE RERUN -> `[]`; BROKEN LOOP -> failed after `plan` + 3 heals; prep element gone -> `[]` with 1 skipped
    The script serves a copy of `site/` with `Cache-Control: no-store` (the drift test edits pages).
    New LLM prompt path: extend `fake_complete` (and `fake` in gui_flow.py); both fakes take `json_mode`.
 3. GUI changes: `.venv/Scripts/python .claude/skills/ecogent/scripts/gui_smoke.py <scratch>/gui`, then read

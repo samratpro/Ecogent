@@ -195,6 +195,8 @@ class SettingsDialog(Dialog):
                                    ("analysis_direct_chars", "Analyze in one call up to (chars)"),
                                    ("analysis_budget_chars", "Relevance filter: page text for analysis (chars, 0 = off)"),
                                    ("max_heals_per_run", "Max LLM heals per run"),
+                                   ("max_rescue_turns", "ReAct fallback: moves per failed step (0 = off)"),
+                                   ("max_rescues_per_run", "ReAct fallback: steps per run"),
                                    ("max_run_tokens", "Token budget per run (0 = unlimited)")):
                     self.w[key] = dpg.add_input_int(label=label, default_value=getattr(settings, key), width=160)
                 self.w["use_vector_memory"] = dpg.add_checkbox(label="Use ChromaDB vector memory to reuse similar plans",
@@ -281,7 +283,7 @@ class SettingsDialog(Dialog):
             data[key] = dpg.get_value(self.w[key]).strip()
         for key in ("debug_port", "page_timeout_ms", "max_heal_attempts", "scrape_sample_size",
                     "max_page_chars", "analysis_direct_chars", "analysis_budget_chars", "max_heals_per_run",
-                    "max_run_tokens", "headless", "use_vector_memory"):
+                    "max_rescue_turns", "max_rescues_per_run", "max_run_tokens", "headless", "use_vector_memory"):
             data[key] = dpg.get_value(self.w[key])
         if not data["home"]:
             dpg.set_value(self.err, "Home folder is required.")

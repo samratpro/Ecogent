@@ -7,6 +7,7 @@ Executor.act_<name> for each step. To add a tool: add a Tool here and an act_<na
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 ALL = ()  # empty = available for every task type
@@ -82,13 +83,60 @@ def allowed(name: str, task_type: str) -> bool:
 
 def catalog(task_type: str) -> str:
     """Tool list for the system prompt, only the tools of this task type, one compact line each
-    (no column padding: whitespace is billed too)."""
-    lines = ['TOOLS (use only these as "action"):']
+    (no column padding: whitespace is billed too). A flat list on purpose: with group headings
+    ("[Browser]", "[Results]") small models used the heading as the action."""
     tools = tools_for(task_type)
-    for group, title in GROUP_TITLES.items():
-        items = [t for t in tools if t.group == group]
-        if not items:
-            continue
-        lines.append(f"[{title}]")
-        lines += [f"- {t.name}({t.params}): {t.desc}" for t in items]
+    lines = ['TOOLS - "action" must be one of these names exactly:']
+    for group in GROUP_TITLES:
+        lines += [f"- {t.name}({t.params}): {t.desc}" for t in tools if t.group == group]
+    if any(t.group == "file" for t in tools):
+        lines.append("File paths are relative to the selected folder, else the output folder.")
     return "\n".join(lines)
+
+
+def _words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z]+", (text or "").lower()) if len(w) > 2}
+
+
+def guess(step: dict, task_type: str) -> str:
+    """The real tool for a step whose "action" is not a tool name ("Browser", "Page data",
+    "open url", "Results"): exact after normalizing, else the clear best match by the step's
+    fields and name, restricted to the group the wrong name points at. '' when unsure."""
+    raw = str(step.get("action") or "")
+    norm = re.sub(r"[\s\-]+", "_", raw.strip().lower())
+    if allowed(norm, task_type):
+        return norm
+    tools = tools_for(task_type)
+    aw = _words(raw)
+    groups = {g for g, title in GROUP_TITLES.items() if aw & (_words(title) | {g})}
+    pool = [t for t in tools if t.group in groups] or tools
+    if len(pool) == 1:
+        return pool[0].name
+    # A group name only chooses the group; inside it the step's own name decides.
+    hint = _words(step.get("step_name", "")) | (set() if groups else aw)
+    keys = {k for k in step if k not in ("id", "step_name", "action", "on_fail", "validation")}
+
+    def score(t: Tool) -> float:
+        params = {p.strip(" ?").split(" ")[0] for p in re.split(r"[,|]", t.params) if p.strip()}
+        return 2 * len(hint & _words(t.name.replace("_", " "))) + len(keys & params) + 0.5 * len(hint & _words(t.desc))
+    ranked = sorted(((score(t), t.name) for t in pool), reverse=True)
+    if ranked[0][0] > 0 and (len(ranked) == 1 or ranked[0][0] > ranked[1][0]):
+        return ranked[0][1]
+    return ""
+
+
+def repair_steps(steps: list, task_type: str, log=None) -> int:
+    """Fix wrong action names in place (nested steps too), with no LLM call. Returns the count."""
+    fixed = 0
+    for st in steps or []:
+        if not isinstance(st, dict):
+            continue
+        if not allowed(str(st.get("action")), task_type):
+            new = guess(st, task_type)
+            if new:
+                if log:
+                    log(f"Step {st.get('id')}: action '{st.get('action')}' is not a tool; using '{new}' (no LLM)")
+                st["action"] = new
+                fixed += 1
+        fixed += repair_steps(st.get("steps") or [], task_type, log)
+    return fixed

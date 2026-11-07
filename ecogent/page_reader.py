@@ -393,6 +393,48 @@ def page_outline(html: str, max_chars: int = 12000) -> str:
     return "\n".join(out)[:max_chars]
 
 
+def focus_outline(outline: str, hint: str, max_chars: int = 3000, around: int = 3) -> str:
+    """The parts of a page outline that mention the hint, each with its ancestor lines (so a
+    selector can still be written) and a few neighbours. '' when nothing matches or the
+    outline is already small - then the caller sends the full outline."""
+    if len(outline) <= max_chars:
+        return ""
+    words = hint_words(hint)
+    if not words:
+        return ""
+    lines = outline.split("\n")
+    depth = [len(l) - len(l.lstrip(" ")) for l in lines]
+    scores = [sum(1 for w in words if w in l.lower()) for l in lines]
+    if not any(scores):
+        return ""
+    keep: set[int] = set()
+    size = 0
+    for i in sorted(range(len(lines)), key=lambda i: (-scores[i], i)):
+        if not scores[i]:
+            break
+        block = set(range(max(0, i - around), min(len(lines), i + around + 1)))
+        d = depth[i]
+        for j in range(i - 1, -1, -1):          # ancestors: nearest line above with less indent
+            if depth[j] < d:
+                block.add(j)
+                d = depth[j]
+                if d == 0:
+                    break
+        new = block - keep
+        add = sum(len(lines[j]) + 1 for j in new)
+        if keep and size + add > max_chars:
+            break
+        keep |= new
+        size += add
+    out, last = [], -2
+    for j in sorted(keep):
+        if j != last + 1:
+            out.append("...")
+        out.append(lines[j])
+        last = j
+    return "\n".join(out)[:max_chars]
+
+
 def detect_blocker(html: str) -> Optional[str]:
     """Return a reason when the page shows a captcha / bot challenge."""
     raw = (html or "").lower()
@@ -405,6 +447,18 @@ def detect_blocker(html: str) -> Optional[str]:
             if p in low:
                 return f"page says '{p}'"
     return None
+
+
+_LOGIN_HINT = re.compile(r"log[ _-]?in|sign[ _-]?in|signin|auth|sso|session", re.I)
+
+
+def detect_login_wall(html: str, url: str) -> bool:
+    """A login form: a visible password box on a page whose URL or title talks about logging in."""
+    soup = soup_of(html)
+    if not any(not _is_hidden(i) for i in soup.find_all("input", attrs={"type": "password"})):
+        return False
+    title = soup.title.get_text(" ") if soup.title else ""
+    return bool(_LOGIN_HINT.search(f"{url} {title}"))
 
 
 # --------------------------------------------------------------------------- links
@@ -437,6 +491,42 @@ def links(html: str, base_url: str) -> list[dict]:
         chrome = a.find_parent(CHROME_TAGS) is not None
         out.append({"text": text[:100], "href": url, "sig": _signature(a), "chrome": chrome})
     return [l for l in out if not l["chrome"]] + [l for l in out if l["chrome"]]
+
+
+def links_to_offer(items: list[dict], hint: str, limit: int, max_show: int = 80) -> list[dict]:
+    """The links worth showing the LLM for "pick the links that match <hint>".
+    Each cut only happens while enough links remain (at least 2x the wanted number):
+      * nav / header / footer / aside links (chrome),
+      * links whose text repeats on the page ("Cited by 12", "Related articles", "Read more")
+        unless the hint names them - per-result actions, not results.
+    Order is kept (content first), so the result is a prefix-style subset of `items`."""
+    enough = max(limit * 2, 10)
+    out = items
+    content = [l for l in out if not l.get("chrome")]
+    if len(content) >= enough:
+        out = content
+    words = set(hint_words(hint))
+    shape = lambda t: re.sub(r"\d[\d,.]*", "#", t.lower()).strip()
+    counts = Counter(shape(l["text"]) for l in out)
+    kept = [l for l in out if counts[shape(l["text"])] < 3
+            or words & set(re.findall(r"[a-z0-9]+", l["text"].lower()))]
+    if len(kept) >= enough:
+        out = kept
+    return out[:max_show]
+
+
+def result_group(items: list[dict], min_size: int = 3) -> list[dict]:
+    """The page's one clear list of repeated content links (search results, product titles):
+    the largest group sharing a specific signature, outside nav/header/footer, at least twice as
+    big as the next group. [] when there is no clear list."""
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for l in items:
+        if not l.get("chrome") and "." in (l.get("sig") or ""):
+            groups[l["sig"]].append(l)
+    ranked = sorted(groups.values(), key=len, reverse=True)
+    if not ranked or len(ranked[0]) < min_size or (len(ranked) > 1 and len(ranked[0]) < 2 * len(ranked[1])):
+        return []
+    return ranked[0]
 
 
 def links_for_prompt(items: list[dict], base_url: str = "") -> str:
@@ -503,11 +593,17 @@ def next_page_candidates(html: str) -> list[dict]:
     out = []
     for el in soup.find_all(["a", "button", "li", "span"]):
         txt = _norm(el.get_text(" ")).lower()
+        bare = re.sub(r"[›»>→\s]+", " ", txt).strip()       # "Next →", "next »" -> "next"
         aria = (el.get("aria-label") or "").lower()
         rel = " ".join(el.get("rel", [])) if el.get("rel") else ""
         cls = " ".join(el.get("class", [])).lower()
-        if txt in ("next", "next page", "›", "»", ">", "next ›", "next »") or "next" in aria or rel == "next" \
-                or ("next" in cls and el.name in ("a", "button")):
+        parent_cls = " ".join(el.parent.get("class", [])).lower() if isinstance(el.parent, Tag) else ""
+        arrow_only = bare == "" and txt and el.name in ("a", "button")         # a link that is just "»"
+        if bare in ("next", "next page") or arrow_only or "next" in aria or rel == "next" \
+                or ("next" in cls and el.name in ("a", "button")) \
+                or (el.name == "a" and re.search(r"\bnext\b", parent_cls)):     # <li class="next"><a>
+            if el.name in ("li", "span") and el.find("a"):
+                continue            # the link inside is the clickable one
             info = describe(el)
             info["selector"] = css_selector(el, soup)
             out.append(info)

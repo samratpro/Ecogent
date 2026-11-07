@@ -27,8 +27,8 @@ TASK_LABELS = {
 
 # LLM jobs that may be routed to the cheap model (when one is configured). Simple, short jobs
 # suit a small/cheap model; planning and the final analysis stay on the main model by default.
-LLM_PURPOSES = ["plan", "followup", "pick", "locate", "heal", "pattern", "validate", "analyze_map", "analyze",
-                "classify", "repair"]
+LLM_PURPOSES = ["plan", "followup", "pick", "locate", "heal", "rescue", "pattern", "validate", "analyze_map",
+                "analyze", "classify", "repair"]
 CHEAP_PURPOSES_DEFAULT = ["pick", "validate", "analyze_map", "classify", "repair"]
 
 
@@ -80,6 +80,8 @@ class Settings:
     local_purposes: list = field(default_factory=lambda: list(CHEAP_PURPOSES_DEFAULT))
     max_heal_attempts: int = 2        # per step
     max_heals_per_run: int = 6        # across all steps / for_each items of one run
+    max_rescue_turns: int = 3         # ReAct fallback: moves per step when heal could not fix it (0 = off)
+    max_rescues_per_run: int = 2      # steps per run that may use the ReAct fallback
     max_run_tokens: int = 150000      # per-run token budget; asks before going over (0 = unlimited)
     scrape_sample_size: int = 15
     max_page_chars: int = 12000

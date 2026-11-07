@@ -62,13 +62,15 @@ class RunStats:
     local_picks: int = 0        # new elements chosen without the LLM (obvious candidate)
     llm_lookups: int = 0
     healed: int = 0
+    rescued: int = 0            # steps finished by the bounded ReAct fallback
     items_done: int = 0
     items_failed: int = 0
 
     def line(self) -> str:
         return (f"{self.steps_ok} steps ok, {self.steps_failed} failed, {self.steps_skipped} skipped | "
                 f"selector cache hits {self.cache_hits}, local re-finds {self.local_heals}, "
-                f"local picks {self.local_picks}, LLM lookups {self.llm_lookups}, healed {self.healed}")
+                f"local picks {self.local_picks}, LLM lookups {self.llm_lookups}, healed {self.healed}"
+                + (f", rescued {self.rescued}" if self.rescued else ""))
 
 
 class Executor:
@@ -88,6 +90,7 @@ class Executor:
         self.stats = RunStats()
         self.pattern_calls = 0          # shared by every extract_records attempt in this run
         self.run_heals = 0              # LLM heals in this run (all steps and for_each items)
+        self.run_rescues = 0            # steps sent to the ReAct fallback in this run
         self.force_visible = False      # set after a captcha in headless mode
         self._tok_frames: list[int] = []    # tokens used by nested steps, per open run_step
         self._budget_start = self._tokens()
@@ -192,6 +195,8 @@ class Executor:
     def run(self, steps: list[dict], reset_data: bool = False) -> RunStats:
         if reset_data:
             self._reset_data()
+        # Every run must produce its own output file; an old one would hide a run that wrote none.
+        self.data().pop("output_file", None)
         run_entry = {"started": now_iso(), "status": "running"}
         self.plan.setdefault("runs", []).append(run_entry)
         try:
@@ -221,6 +226,12 @@ class Executor:
                 pass
         d["temp_files"] = []
         d.pop("records_count", None)
+        d.pop("output_file", None)      # each run must produce its own (checked after the run)
+        if self.task_type != "automation":
+            # dedupe = "skip items handled in earlier runs". Automation means it (never apply to the
+            # same job twice); for analysis/scraping the items' data was just deleted, so skipping
+            # them would leave nothing to analyze.
+            d.pop("processed", None)
 
     def run_step(self, step: dict, prefix: str = "") -> Any:
         start = self._tokens()
@@ -232,10 +243,12 @@ class Executor:
             if self._tok_frames:                # tell the parent (for_each) what its children used
                 self._tok_frames[-1] += self._tokens() - start
 
+    KEEP_ACTION = ("analyze", "write_output", "extract_records", "for_each")   # heal may fix, not replace
+
     def _run_step(self, step: dict, prefix: str = "") -> Any:
         key = prefix + str(step.get("id", step.get("step_name", "step")))
         current = step
-        heals = user_holds = 0
+        heals = user_holds = rescues = 0
         mark = self._tokens()       # heal calls happen between attempts: counted on the next log line
         while True:
             self.check_stop()
@@ -286,6 +299,12 @@ class Executor:
                     d = (decision or {}).get("decision")
                     if d == "retry" and isinstance(decision.get("step"), dict):
                         new_step = {**current, **decision["step"], "id": current.get("id")}
+                        if action in self.KEEP_ACTION and new_step.get("action") != action:
+                            # The step that produces the deliverable must stay that step: a heal
+                            # that turns "analyze" into "get_page_data" ends "done" with no output.
+                            self.log(f"Heal tried to replace '{action}' with '{new_step.get('action')}'; "
+                                     f"kept '{action}'")
+                            new_step["action"] = action
                         self.log(f"Healing {key}: {new_step.get('step_name', '')}")
                         if (new_step.get("target"), new_step.get("action")) != (current.get("target"), current.get("action")):
                             self._forget(key)   # a different element now; same target keeps its memory
@@ -298,8 +317,33 @@ class Executor:
                         self.stats.steps_skipped += 1
                         self.save_plan()
                         return None
-                    if d == "ask_user":
+                    if d == "ask_user" and self.browser.alive and not self._human_wall()                             and current.get("action") in self.RESCUE_ACTIONS:
+                        self.log(f"Heal asked for a human ({str(decision.get('message', ''))[:100]}), but no "
+                                 "captcha/login is on the page; trying the page itself first")
+                    elif d == "ask_user":
                         if self.ui.hold(self.chat_id, decision.get("message") or err):
+                            continue
+                        raise StopRequested("aborted by user")
+
+                # Heal could not fix it: a few guided moves on the live page (bounded ReAct).
+                if rescues < 1 and self._can_rescue(current, e):
+                    rescues += 1
+                    res = self._rescue(current, key, prefix, err)
+                    if res == "ok":
+                        r = self.rec(key)
+                        r.update(status="ok", last_ok=now_iso(), error="", runs=r.get("runs", 0) + 1)
+                        self.stats.steps_ok += 1
+                        self.stats.rescued += 1
+                        self._log(key, current, "ok", mark)
+                        self.save_plan()
+                        return None
+                    if res and res.startswith("user:") and user_holds < 3:
+                        user_holds += 1
+                        try:
+                            self._show_browser()
+                        except Exception as be:  # noqa: BLE001 - still ask the user
+                            self.log(f"Could not open a visible browser: {be}")
+                        if self.ui.hold(self.chat_id, res[5:]):
                             continue
                         raise StopRequested("aborted by user")
 
@@ -340,7 +384,15 @@ class Executor:
         action = step.get("action", "")
         tool = toolbox.REGISTRY.get(action)
         if tool is None:
-            raise StepFailed(f"unknown tool '{action}'")
+            # A heal or patch may still name a tool wrongly ("Browser", "open url"): fix it for free
+            # before paying for another heal.
+            guess = toolbox.guess(step, self.task_type)
+            if not guess:
+                raise StepFailed(f"unknown tool '{action}'")
+            self.log(f"{key}: action '{action}' is not a tool; using '{guess}' (no LLM)")
+            step["action"] = action = guess
+            self._replace_step(step)
+            tool = toolbox.REGISTRY[guess]
         if not toolbox.allowed(action, self.task_type):
             raise StepFailed(f"tool '{action}' is not available for {self.task_type} tasks")
         if tool.browser:
@@ -350,15 +402,74 @@ class Executor:
     # ---- browser tools
     def act_open_url(self, step: dict, key: str) -> None:
         url = self.render(step.get("url", ""))
+        fb = self.render(step.get("fallback_url", ""))
         try:
-            self.browser.goto(url)
+            status = self.browser.goto(url)
         except Exception:
-            fb = self.render(step.get("fallback_url", ""))
             if not fb:
                 raise
             self.log(f"{url} failed, trying fallback {fb}")
-            self.browser.goto(fb)
+            status, fb = self.browser.goto(fb), ""
+        if status >= 400 and fb:
+            self.log(f"{url} returned HTTP {status}, trying fallback {fb}")
+            status = self.browser.goto(fb)
+        if status >= 400:
+            # Planners guess deep URLs ("books-travel_2" for "books/travel_2"). An error page would
+            # only waste lookups/pattern calls: find the real page by its link on the site, free.
+            found = "" if "{{" in str(step.get("url", "")) else self._find_by_link(url, step)
+            if not found:
+                raise StepFailed(f"HTTP {status} for {url} (the address may be wrong)")
+            self.log(f"{key}: {url} returned HTTP {status}; found the page by its link instead: {found} (no LLM)")
+            step["url"] = found
+            self._replace_step(dict(step))
+            url = found
         self._check_blocker()
+        self._check_session(url)
+
+    URL_NOISE = {"index", "html", "htm", "php", "aspx", "catalogue", "catalog", "category", "www", "open", "page"}
+
+    def _find_by_link(self, url: str, step: dict) -> str:
+        """The site's own link that best matches a URL that returned an error: path similarity
+        plus words of the path and step name in the link text. Only a clear winner is used."""
+        from urllib.parse import urlparse
+        u = urlparse(url if "://" in url else "https://" + url)
+        if not u.netloc:
+            return ""
+        try:
+            if self.browser.goto(f"{u.scheme}://{u.netloc}/") >= 400:
+                return ""
+        except Exception:
+            return ""
+        links = [l for l in pr.links(self.browser.html(), self.browser.url) if urlparse(l["href"]).netloc == u.netloc]
+        words = set(pr.hint_words(f"{u.path} {step.get('step_name', '')}")) - self.URL_NOISE
+        want = u.path.lower()
+
+        def score(l: dict) -> float:
+            path = urlparse(l["href"]).path.lower()
+            return (difflib.SequenceMatcher(None, want, path).ratio()
+                    + 0.3 * len(words & set(pr.hint_words(f"{l['text']} {path}"))))
+        ranked = sorted(((score(l), l["href"]) for l in links), reverse=True)
+        if not ranked or ranked[0][0] < 0.6 or (len(ranked) > 1 and ranked[0][0] - ranked[1][0] < 0.05):
+            return ""
+        try:
+            return ranked[0][1] if self.browser.goto(ranked[0][1]) < 400 else ""
+        except Exception:
+            return ""
+
+    def _check_session(self, requested: str) -> None:
+        """Login tasks: opening a page but landing on a login form means the saved session
+        expired. Stop clearly instead of letting element lookups and heals burn tokens on a
+        login page (scheduled runs hit this when cookies run out)."""
+        if not (self.plan.get("requirements") or {}).get("needs_login"):
+            return
+        from urllib.parse import urlparse
+        want, got = urlparse(requested if "://" in requested else "https://" + requested), urlparse(self.browser.url)
+        if (want.netloc, want.path.rstrip("/")) == (got.netloc, got.path.rstrip("/")):
+            return                  # this IS the page that was asked for (e.g. the login page itself)
+        if pr.detect_login_wall(self.browser.html(), self.browser.url):
+            raise NeedsUser(f"The site asks you to log in again ({pr.short_url(self.browser.url)}): the saved "
+                            "session has expired. Log in in the browser window, then press Continue - the "
+                            "profile keeps the new cookies for the next runs.")
 
     def act_fill(self, step: dict, key: str) -> None:
         self.browser.fill(self.resolve(step, key), self.render(step.get("value", "")))
@@ -573,13 +684,25 @@ class Executor:
             return sel
         return None
 
+    def _visible(self, cands: list[dict], limit: Optional[int] = None) -> list[dict]:
+        """Drop candidates the user cannot see (hidden parent, CSS class, closed menu) - one
+        browser call - so neither the local picker nor the LLM spends a lookup on them.
+        Re-numbers "i" to match list positions (PICK answers are list indices)."""
+        if cands:
+            flags = self.browser.visible_many([c["selector"] for c in cands])
+            cands = [c for c, ok in zip(cands, flags) if ok]
+        cands = cands[:limit] if limit else cands
+        for i, c in enumerate(cands):
+            c["i"] = i
+        return cands
+
     def _local_refind(self, mem: dict, html: str, action: str, target: str) -> Optional[str]:
         """The remembered element moved or its selector changed: find it again among the page's
         elements by tag, stable attributes and text - only when one candidate clearly wins."""
         stored = mem.get("element")
         if not stored:
             return None
-        cands = pr.candidates(html, action, target, level=2, limit=80)
+        cands = self._visible(pr.candidates(html, action, target, level=2, limit=80))
         scored = sorted(((self._match_score(stored, c), c) for c in cands), key=lambda t: -t[0])
         if not scored:
             return None
@@ -623,7 +746,8 @@ class Executor:
         page = f"Page: {pr.short_url(url)} | {self.browser.title()}"
 
         for level in (1, 2):
-            cands = pr.candidates(html, action, target, level)
+            want = 15 if level == 1 else 60
+            cands = self._visible(pr.candidates(html, action, target, level, limit=want * 2), want)
             if not cands:
                 continue
             if level == 1:
@@ -632,13 +756,15 @@ class Executor:
                     self.stats.local_picks += 1
                     self.log(f"{key}: picked '{pick['text'] or pick['tag']}' without the LLM (clear match)")
                     return self._remember(mem, pick["selector"])
+            if step.get("optional"):
+                continue                # learned prep step (popup, menu): never worth an LLM call
             self.stats.llm_lookups += 1
             ans = self.llm.ask_json("pick", prompts.PICK,
                                     f"Step: {brief}\n{page}\nCandidates:\n{pr.candidates_for_prompt(cands, url)}",
                                     max_tokens=150)
             ans = ans if isinstance(ans, dict) else {}
             if ans.get("need") == "user":
-                raise NeedsUser(ans.get("reason") or "The agent needs your help in the browser.")
+                self._model_says_user(ans.get("reason"))
             try:
                 idx = int(ans.get("index", -1))
             except (TypeError, ValueError):
@@ -646,17 +772,41 @@ class Executor:
             if 0 <= idx < len(cands) and self.browser.exists(cands[idx]["selector"]):
                 return self._remember(mem, cands[idx]["selector"])
 
-        self.stats.llm_lookups += 1
-        ans = self.llm.ask_json("locate", prompts.LOCATE,
-                                f"Step: {brief}\n{page}\nOutline:\n{pr.page_outline(html, self.settings.max_page_chars)}",
-                                max_tokens=200)
-        ans = ans if isinstance(ans, dict) else {}
-        sel = ans.get("selector")
-        if sel and self.browser.exists(sel):
-            return self._remember(mem, sel)
-        if ans.get("need") == "user":
-            raise NeedsUser(ans.get("reason") or "The agent needs your help in the browser.")
+        if step.get("optional"):
+            raise NoHeal(f"optional element not on the page: {target}")
+        # Outline: first only the parts that mention the target (about a quarter of the tokens),
+        # then the full outline if that did not give a working selector.
+        outline = pr.page_outline(html, self.settings.max_page_chars)
+        focused = pr.focus_outline(outline, target, max_chars=min(3000, self.settings.max_page_chars // 3))
+        for view, label in ((focused, "focused"), (outline, "full")):
+            if not view:
+                continue
+            self.stats.llm_lookups += 1
+            ans = self.llm.ask_json("locate", prompts.LOCATE, f"Step: {brief}\n{page}\nOutline:\n{view}",
+                                    max_tokens=200)
+            ans = ans if isinstance(ans, dict) else {}
+            sel = ans.get("selector")
+            if sel and self.browser.exists(sel):
+                if label == "focused":
+                    self.log(f"{key}: found from the focused outline ({len(view):,} of {len(outline):,} chars)")
+                return self._remember(mem, sel)
+            if ans.get("need") == "user" and label == "full":   # the focused view may just lack context
+                self._model_says_user(ans.get("reason"))
         raise StepFailed(f"element not found: {target}")
+
+    def _human_wall(self) -> bool:
+        html = self.browser.html()
+        return bool(pr.detect_blocker(html) or pr.detect_login_wall(html, self.browser.url))
+
+    def _model_says_user(self, reason: Optional[str]) -> None:
+        """The model claims a human is needed. Trust it only when a captcha / login form is really
+        on the page; small models also say it for hidden or not-yet-loaded elements, which heal
+        and the ReAct fallback can handle without stopping the run."""
+        reason = reason or "The agent needs your help in the browser."
+        if self._human_wall():
+            raise NeedsUser(reason)
+        self.log(f"Model asked for a human ({reason[:120]}), but no captcha/login is on the page; "
+                 "treating the element as not found")
 
     def _remember(self, mem: dict, selector: str) -> str:
         """Store the selector with the element's identity and a few alternate locators."""
@@ -710,8 +860,8 @@ class Executor:
             try:
                 html = self.browser.html()
                 url = self.browser.url
-                cands = pr.candidates_for_prompt(pr.candidates(html, step.get("action", "click"),
-                                                               self.render(step.get("target", "")), 2, limit=25), url)
+                cands = pr.candidates_for_prompt(self._visible(pr.candidates(
+                    html, step.get("action", "click"), self.render(step.get("target", "")), 2, limit=50), 25), url)
                 page = f"{pr.short_url(url)} | {self.browser.title()}"
             except Exception:
                 pass
@@ -729,6 +879,174 @@ class Executor:
         except (LLMError, ValueError) as e:
             self.log(f"Healing unavailable: {e}")
             return None
+
+    # ------------------------------------------------------------------ bounded ReAct fallback
+    RESCUE_ACTIONS = ("click", "fill", "press", "select_option", "wait")
+    MOVES = ("click", "fill", "press", "select_option", "scroll", "wait")
+
+    def _can_rescue(self, step: dict, e: Exception) -> bool:
+        return (self.settings.max_rescue_turns > 0 and self.run_rescues < self.settings.max_rescues_per_run
+                and step.get("action") in self.RESCUE_ACTIONS and step.get("on_fail") != "skip"
+                and not step.get("optional") and not isinstance(e, (NoHeal, NeedsUser)) and self.browser.alive)
+
+    def _rescue(self, step: dict, key: str, prefix: str, err: str) -> Optional[str]:
+        """A few observe -> act turns on the live page for ONE step that heal could not fix.
+        Each turn sends only the step, the moves so far and ~30 element lines (never the page or a
+        growing transcript). Returns "ok", "user:<reason>" or None (gave up).
+        When the final move is the step's own action, its element is remembered and the moves
+        before it (popup closed, form revealed, ...) are saved as optional prep steps, so the
+        next run replays everything without the LLM."""
+        self.run_rescues += 1
+        turns = self.settings.max_rescue_turns
+        raw_target = step.get("target", "") or ""
+        target = self.render(raw_target) or step.get("step_name", "")
+        info = {k: step.get(k) for k in ("step_name", "action", "target", "value", "key") if step.get(k)}
+        if target != raw_target:
+            info["resolved_target"] = target
+        brief = json.dumps(info, ensure_ascii=False)
+        mem_key = self._mem_key(key, raw_target, target)
+        history: list[str] = []
+        learned: list[dict] = []
+        self.log(f"{key}: heal could not fix the step; trying up to {turns} guided moves (ReAct fallback)")
+        for _ in range(turns):
+            self.check_stop()
+            html = self.browser.html()
+            reason = pr.detect_blocker(html)
+            if reason:
+                return f"user:Possible captcha/challenge ({reason}). Solve it in the browser, then Continue."
+            cands = self._visible(pr.candidates(html, step.get("action", "click"),
+                                                f"{target} {step.get('step_name', '')}", 2, limit=60), 30)
+            url = self.browser.url
+            user = (f"Goal: {self.plan.get('goal', '')[:200]}\nStep: {brief}\nError: {err[:200]}\n"
+                    f"Moves so far: {'; '.join(history) or 'none'}\n"
+                    f"Page: {pr.short_url(url)} | {self.browser.title()}\n"
+                    f"Elements:\n{pr.candidates_for_prompt(cands, url)}")
+            try:
+                ans = self.llm.ask_json("rescue", prompts.RESCUE, user, max_tokens=150)
+            except BudgetExceeded:
+                raise
+            except (LLMError, ValueError) as e:
+                self.log(f"ReAct fallback unavailable: {e}")
+                return None
+            ans = ans if isinstance(ans, dict) else {}
+            do = ans.get("do")
+            if do == "user":
+                if self._human_wall():
+                    return "user:" + (ans.get("reason") or "The agent needs your help in the browser.")
+                history.append(f"asked for a human ({str(ans.get('reason', ''))[:60]}) but no captcha/login is "
+                               "visible -> act on the page instead")
+                continue
+            if do not in self.MOVES:
+                self.log(f"{key}: ReAct fallback gave up: {str(ans.get('reason', ''))[:200]}")
+                return None
+            final = bool(ans.get("final"))
+            same = final and do == step.get("action")
+            sel, move_mem, label = "", {}, do
+            if do in ("click", "fill", "select_option") or (do == "press" and "index" in ans):
+                try:
+                    idx = int(ans.get("index", -1))
+                except (TypeError, ValueError):
+                    idx = -1
+                if not (0 <= idx < len(cands)) or not self.browser.exists(cands[idx]["selector"]):
+                    history.append(f"{do} [{ans.get('index')}] -> no such visible element")
+                    continue
+                sel = cands[idx]["selector"]
+                self._remember(move_mem, sel)       # identity + alternates while the element is there
+                el = move_mem.get("element") or {}
+                label = f"{do} '{(el.get('text') or el.get('attrs', {}).get('placeholder') or el.get('tag') or sel)[:40]}'"
+            # The step's own value (may be user info) is used for the step's own action; the LLM's
+            # value only for helper moves.
+            value = self.render(step.get("value", "")) if same else str(ans.get("value", ""))
+            press_key = str(ans.get("key") or step.get("key") or "Enter")
+            try:
+                self._do_move(do, sel, value, press_key)
+                if final:
+                    self.validate(step)
+            except StopRequested:
+                raise
+            except NeedsUser as ne:
+                return f"user:{ne}"
+            except Exception as me:  # noqa: BLE001 - tell the model and let it try another move
+                history.append(f"{label} -> failed: {str(me)[:100]}")
+                continue
+            if final:
+                if same and sel:
+                    mem = self.rec(mem_key)
+                    for k in self.MEMORY_FIELDS:
+                        mem.pop(k, None)
+                    mem.update({k: v for k, v in move_mem.items() if k in self.MEMORY_FIELDS})
+                    self._learn(step, prefix, learned)
+                    self.log(f"{key}: done by the ReAct fallback in {len(history) + 1} moves; "
+                             f"saved for the next run ({len(learned)} prep steps)")
+                else:
+                    self.log(f"{key}: done by the ReAct fallback with a different move ({label}); "
+                             "not saved, the next run heals again if needed")
+                return "ok"
+            history.append(f"{label} -> ok, page now {pr.short_url(self.browser.url)}")
+            if sel:
+                learned.append({"action": do, "mem": move_mem, "label": label, "value": value, "key": press_key})
+        self.log(f"{key}: ReAct fallback used its {turns} moves without finishing the step")
+        return None
+
+    def _do_move(self, do: str, sel: str, value: str, key: str) -> None:
+        b = self.browser
+        if do == "click":
+            b.click(sel)
+            self._check_blocker()
+        elif do == "fill":
+            b.fill(sel, value)
+        elif do == "press":
+            b.press(key, sel)
+            self._check_blocker()
+        elif do == "select_option":
+            b.select(sel, value)
+        elif do == "scroll":
+            b.scroll(1)
+        elif do == "wait":
+            b.page.wait_for_timeout(1500)
+
+    def _learn(self, step: dict, prefix: str, learned: list[dict]) -> None:
+        """Insert the helper moves before the step as optional prep steps with their elements
+        remembered. Optional = when the element is not there next time (no popup today), the
+        step is skipped without any LLM call."""
+        if not learned:
+            return
+        used: set = set()
+
+        def ids(items: list) -> None:
+            for s in items:
+                used.add(str(s.get("id")))
+                ids(s.get("steps") or [])
+        ids(self.task)
+        new_steps = []
+        for i, mv in enumerate(learned, 1):
+            sid = f"{step.get('id')}_r{i}"
+            while sid in used:
+                sid += "_"
+            used.add(sid)
+            el = mv["mem"].get("element") or {}
+            st = {"id": sid, "step_name": f"prep: {mv['label']}"[:40], "action": mv["action"],
+                  "target": (el.get("text") or el.get("attrs", {}).get("placeholder") or mv["label"])[:80],
+                  "on_fail": "skip", "optional": True}
+            if mv["action"] in ("fill", "select_option"):
+                st["value"] = mv["value"]
+            if mv["action"] == "press":
+                st["key"] = mv["key"]
+            rec = self.rec(prefix + sid)
+            rec.clear()
+            rec.update({k: v for k, v in mv["mem"].items() if k in self.MEMORY_FIELDS})
+            new_steps.append(st)
+
+        def insert(items: list) -> bool:
+            for i, s in enumerate(items):
+                if s.get("id") == step.get("id"):
+                    items[i:i] = new_steps
+                    return True
+                if s.get("steps") and insert(s["steps"]):
+                    return True
+            return False
+        if insert(self.task):
+            self.session.save_task(self.task)
 
     # ------------------------------------------------------------------ data actions
     def _add_data(self, title: str, source: str, text: str, label: str = "") -> str:
@@ -748,12 +1066,23 @@ class Executor:
         r = self.rec(key)
         chosen = []
         sigs = set(r.get("link_signatures", []))
-        if sigs:
-            chosen = [l for l in all_links if l["sig"] in sigs][:limit]
+        hrefs = set(r.get("link_hrefs", []))
+        if sigs or hrefs:
+            # Same link shape (new results on a results page) or the very same link (stable pages,
+            # e.g. links inside an article, whose shapes are too generic to store).
+            chosen = [l for l in all_links if l["sig"] in sigs or l["href"] in hrefs][:limit]
+            # Far fewer links than last time = the shapes only partly match the page now (layout
+            # change): ask again rather than silently collect less. Equal or close: free reuse.
+            before = int(r.get("link_count") or 0)
+            if chosen and len(chosen) * 2 < min(before, limit):
+                self.log(f"Only {len(chosen)} of the {before} remembered result links match now; picking again")
+                chosen = []
             if chosen:
                 self.stats.cache_hits += 1
         if not chosen:
-            shown = all_links[:150]
+            shown = pr.links_to_offer(all_links, self.render(step.get("target", "")), limit)
+            if len(shown) < len(all_links):
+                self.log(f"Links offered to the LLM: {len(shown)} of {len(all_links)} (repeated / menu links left out)")
             listing = pr.links_for_prompt(shown, self.browser.url)
             self.stats.llm_lookups += 1
             ans = self.llm.ask_json("pick", prompts.PICK_LINKS,
@@ -761,6 +1090,10 @@ class Executor:
                                     f"Page: {pr.short_url(self.browser.url)}\nLinks:\n{listing}", max_tokens=300)
             idxs = ans.get("indices", []) if isinstance(ans, dict) else ans if isinstance(ans, list) else []
             chosen = [shown[int(i)] for i in idxs if str(i).lstrip("-").isdigit() and 0 <= int(i) < len(shown)][:limit]
+            if not chosen:
+                chosen = pr.result_group(shown)[:limit]
+                if chosen:
+                    self.log(f"LLM picked no link; using the page's repeated result links ({len(chosen)}) (no LLM)")
             # Remember link "shapes" only when they are specific enough to reuse.
             good = set()
             for l in chosen:
@@ -768,6 +1101,8 @@ class Executor:
                 if "." in l["sig"] and same <= max(limit * 3, 30):
                     good.add(l["sig"])
             r["link_signatures"] = sorted(good)
+            r["link_hrefs"] = [l["href"] for l in chosen]
+            r["link_count"] = len(chosen)
         urls = [l["href"] for l in chosen]
         self.vars[step.get("save_as", "links")] = urls
         self.data().setdefault("collected", {})[step.get("save_as", "links")] = urls
@@ -775,6 +1110,8 @@ class Executor:
         if not urls:
             raise StepFailed("no matching links found")
         return urls
+
+    LOOP_FAIL_FAST = 3      # consecutive failed items at the start of a loop = broken loop
 
     def act_for_each(self, step: dict, key: str) -> int:
         source = step.get("source", "links")
@@ -786,7 +1123,8 @@ class Executor:
         limit = int(step.get("limit") or len(items) or 0)
         dedupe = bool(step.get("dedupe"))
         processed = self.data().setdefault("processed", {}).setdefault(key, []) if dedupe else []
-        done = 0
+        done = failed = 0
+        last_error = ""
         for item in items:
             if done >= limit:
                 break
@@ -807,11 +1145,22 @@ class Executor:
             except LLMError:
                 raise
             except Exception as e:
+                failed += 1
+                last_error = str(e)[:200]
                 self.stats.items_failed += 1
                 self.log(f"Item failed ({item}): {e}")
+                if not done and failed >= self.LOOP_FAIL_FAST:
+                    self.item = None
+                    # The first items all fail: the loop itself is broken. Stop before every
+                    # remaining item pays for the same heals and timeouts.
+                    raise NoHeal(f"the first {failed} items all failed; stopped the loop. Last error: {last_error}")
             finally:
                 self.item = None
-        self.log(f"for_each {key}: {done} items processed")
+        self.log(f"for_each {key}: {done} items processed" + (f", {failed} failed" if failed else ""))
+        if failed and not done:
+            # Every item failed: the loop is broken, not one bad item. Report it as a failed step
+            # (no step heal: the inner steps were already healed per item).
+            raise NoHeal(f"all {failed} items failed; last error: {last_error}")
         return done
 
     def write_output(self) -> str:
@@ -826,9 +1175,14 @@ class Executor:
             # Automation: write the log of handled items (for_each with dedupe).
             records = [{"loop": loop, "item": item}
                        for loop, items in self.data().get("processed", {}).items() for item in items]
-        if not records:
+        scraped = self.vars.get("records") is not None or bool(self.data().get("records_file"))
+        if not records and not scraped:
             raise StepFailed("nothing to write: no records or processed items yet")
-        final = output.write_rows(records, path)
+        # A scrape where nothing matched the filters is a valid answer: write the header only.
+        cols = [f.get("name") for f in (self.plan.get("scrape") or {}).get("fields", []) if isinstance(f, dict)]
+        final = output.write_rows(records, path, columns=[c for c in cols if c])
+        if not records:
+            self.log("No records matched; wrote a file with the header only")
         self.data()["output_file"] = str(final)
         self.log(f"Output written: {final}")
         return str(final)

@@ -143,15 +143,20 @@ class BrowserSession:
             self.page.bring_to_front()
             self.log("Switched to newly opened tab")
 
-    def goto(self, url: str) -> None:
+    def goto(self, url: str) -> int:
+        """Open a page; returns the HTTP status (0 when unknown, e.g. about: pages)."""
         url = (url or "").strip()
         scheme = url.split(":", 1)[0].lower() if "://" in url or url.lower().startswith("about:") else ""
         if scheme and scheme not in ("http", "https", "about"):
             raise BrowserError(f"only http/https pages can be opened, not '{scheme}:' (local files go through the file tools)")
         if not scheme:
             url = "https://" + url
-        self.page.goto(url, wait_until="domcontentloaded")
+        resp = self.page.goto(url, wait_until="domcontentloaded")
         self._settle()
+        try:
+            return int(resp.status) if resp is not None else 0
+        except Exception:
+            return 0
 
     def exists(self, selector: str) -> bool:
         try:
@@ -159,6 +164,28 @@ class BrowserSession:
             return loc.count() > 0 and loc.first.is_visible()
         except Exception:
             return False
+
+    def visible_many(self, selectors: list[str]) -> list[bool]:
+        """Real visibility of many CSS selectors in ONE browser round trip: catches what the HTML
+        alone cannot show (CSS classes, hidden parents, closed menus). Same rule as Playwright's
+        is_visible: non-empty box and not visibility:hidden. Unknown (bad selector, page busy)
+        counts as visible, so this filter can only remove elements, never break a lookup."""
+        if not selectors:
+            return []
+        try:
+            res = self.page.evaluate(
+                """sels => sels.map(s => {
+                    let el;
+                    try { el = document.querySelector(s); } catch (e) { return true; }
+                    if (!el) return true;
+                    const r = el.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== "hidden";
+                })""", selectors)
+            if isinstance(res, list) and len(res) == len(selectors):
+                return [bool(x) for x in res]
+        except Exception:
+            pass
+        return [True] * len(selectors)
 
     def element_text(self, selector: str) -> str:
         try:
@@ -184,23 +211,34 @@ class BrowserSession:
         except Exception:
             return {}
 
+    @property
+    def action_timeout(self) -> int:
+        """Wait for an element to become clickable/fillable. The element was just found visible,
+        so a long wait only means it is covered or disabled: fail fast and let healing act
+        (page loads keep the full page_timeout_ms)."""
+        return min(self.settings.page_timeout_ms, 10000)
+
     def click(self, selector: str) -> None:
         before = len(self.page.context.pages)
         loc = self.page.locator(selector).first
-        loc.scroll_into_view_if_needed()
-        loc.click()
+        t = self.action_timeout
+        try:
+            loc.scroll_into_view_if_needed(timeout=t)
+        except Exception:
+            pass                    # the click below reports the real problem
+        loc.click(timeout=t)
         self.page.wait_for_timeout(1000)
         self._follow_new_tab(before)
         self._settle()
 
     def fill(self, selector: str, value: str) -> None:
         loc = self.page.locator(selector).first
-        loc.click()
-        loc.fill(value)
+        loc.click(timeout=self.action_timeout)
+        loc.fill(value, timeout=self.action_timeout)
 
     def press(self, key: str, selector: str = "") -> None:
         if selector:
-            self.page.locator(selector).first.press(key)
+            self.page.locator(selector).first.press(key, timeout=self.action_timeout)
         else:
             self.page.keyboard.press(key)
         self._settle()
@@ -208,9 +246,9 @@ class BrowserSession:
     def select(self, selector: str, value: str) -> None:
         loc = self.page.locator(selector).first
         try:
-            loc.select_option(label=value)
+            loc.select_option(label=value, timeout=self.action_timeout)
         except Exception:
-            loc.select_option(value)
+            loc.select_option(value, timeout=self.action_timeout)
 
     def download(self, selector: str, folder: Path) -> Path:
         with self.page.expect_download(timeout=self.settings.page_timeout_ms) as info:
@@ -221,7 +259,7 @@ class BrowserSession:
         return target
 
     def upload(self, selector: str, path: str) -> None:
-        self.page.locator(selector).first.set_input_files(path)
+        self.page.locator(selector).first.set_input_files(path, timeout=self.action_timeout)
 
     def scroll(self, times: int = 1) -> None:
         for _ in range(max(1, times)):

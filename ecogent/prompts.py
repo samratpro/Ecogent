@@ -60,7 +60,12 @@ INIT_SCHEMA = """Return JSON:
  "current_task": [ ...steps... ]}
 Omit "scrape" unless scraping; omit "requirements" unless login/user info/schedule is needed."""
 
-FOLLOWUP_SCHEMA = """The user sent a follow-up in an existing chat. Decide the cheapest way to satisfy it.
+ADAPT_HINT = """A similar task was solved before (below). If it fits with small changes, return ONLY
+{"title", "summary", "reply", "plan_updates": {changed plan keys only}, "step_changes": {"replace": [...same id...],
+"insert_after": {"<id>|^": [...]}, "remove": ["<id>"]}} - unchanged steps keep their ids and cached selectors.
+Return the full plan + current_task only when most steps change. Earlier task:"""
+
+FOLLOWUP_SCHEMA ="""The user sent a follow-up in an existing chat. Decide the cheapest way to satisfy it.
 Return JSON:
 {
  "decision": "rerun|heal|extend|reanalyze|reply",
@@ -91,6 +96,8 @@ Return JSON {"selector": "<CSS selector valid for document.querySelector>"} or
 {"selector": null, "need": "user", "reason": "..."} if a human must act."""
 
 PICK_LINKS = """Choose which links match the request. You get a numbered link list.
+When the request names a kind of item (search results, papers, products), the page's content links of
+that kind match even if their titles do not repeat the search words.
 Return JSON {"indices": [<numbers in order of relevance>]}. Return at most the requested limit."""
 
 HEAL = """A step failed. Decide how to recover with the least work.
@@ -98,18 +105,30 @@ Return JSON {"decision": "retry|skip|ask_user|abort", "step": {...corrected step
 "message": "for ask_user / abort: what is wrong"}.
 retry = run the corrected step (fix url, target description, action, or add a fallback)."""
 
+RESCUE = """You finish ONE failed browser step by acting on the live page, one move per reply, few moves.
+You get the step, the moves made so far and the page's visible elements (numbered).
+Reply JSON for the next move:
+{"do": "click|fill|press|select_option|scroll|wait", "index": <element number>, "value": "for fill/select",
+ "key": "for press, e.g. Enter", "final": true|false}
+final=true only when this move IS the step itself (e.g. fills the box the step meant); earlier moves
+(close a popup, open a menu or tab, reveal a form) are final=false.
+Or {"do": "user", "reason": "..."} if a human must act (captcha, login), or {"do": "give_up", "reason": "..."}."""
+
 PATTERN = """Build a reusable scraping pattern from repeated page blocks.
 Return JSON:
 {"item_selector": "CSS selecting every record block",
- "fields": {"<field>": {"selector": "CSS relative to the item ('' = the item itself)", "attr": "text|href|src|<attribute>"}},
+ "fields": {"<field>": {"selector": "CSS relative to the item ('' = the item itself)", "attr": "text|href|src|<attribute>",
+            "many": true only for list fields with several values per record (tags)}},
  "pagination": "next|scroll|none",
  "next_selector": "CSS of the next-page link/button ('' if none)"}
 Use stable class names or attributes, avoid positions like nth-child when possible.
 Use EXACTLY the field names you are given. Each field selects its own small child element
 (title link, price span, ...); use "" only when the whole block really is the value.
-item_selector must select the whole record block (one per record), not an image or text part."""
+item_selector must select the whole record block (one per record), not an image or text part.
+next_selector must match the Next link on EVERY page (li.next > a, a[rel=next]), never one page's href."""
 
 VALIDATE = """Check whether sample scraped records match what the user wants.
+Values ending in "…" were shortened for this check only; do not report them as cut off.
 Return JSON {"ok": true|false, "problems": "what is wrong and which field (empty if ok)"}."""
 
 ANALYZE_MAP = """Extract what is relevant to the goal from one source document.

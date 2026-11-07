@@ -32,7 +32,44 @@ def fake_complete(self, system, messages, max_tokens=None, json_mode=False):
     user = messages[-1]["content"]
     def r(obj): return L.LLMResponse(obj if isinstance(obj, str) else json.dumps(obj), len(system+user)//4, 50, "fake", "fake")
     if P.HEAL in system:
-        CALLS.append("heal"); return r({"decision": "skip"})
+        CALLS.append("heal")
+        if "Verification" in user or "code box" in user:            # rescue test: heal cannot fix it
+            return r({"decision": "abort", "message": "the box is not visible"})
+        if "_missing" in user:                                         # broken loop test
+            return r({"decision": "abort", "message": "file does not exist"})
+        return r({"decision": "skip"})
+    if system == P.RESCUE:
+        CALLS.append("rescue")
+        assert "Elements:" in user and len(user) < 4000, user          # small view, no full page
+        lines = user.split("Elements:\n")[1].splitlines()
+        if "Moves so far: none" in user:
+            return r({"do": "click", "index": next(i for i, l in enumerate(lines) if "Show form" in l), "final": False})
+        return r({"do": "fill", "index": next(i for i, l in enumerate(lines) if "<input" in l), "value": "WRONG", "final": True})
+    if system == P.LOCATE:
+        CALLS.append("locate")   # like gpt-4o-mini on a hidden box: claims a human is needed
+        return r({"selector": None, "need": "user", "reason": "the box is hidden; the user must click Show form"})
+    if P.INIT_SCHEMA in system and "TYPO404" in user:
+        CALLS.append("plan"); return r({"title": "Typo url", "summary": "s", "reply": "ok",
+          "plan": {"goal": "read article one", "destination": {"start_url": B + "/articel1.html"}},
+          "current_task": [{"id": "s1", "step_name": "Open article one", "action": "open_url", "url": B + "/articel1.html"},
+                           {"id": "s2", "action": "get_page_data", "label": "a1"}]})
+    if P.INIT_SCHEMA in system and "LOOPFAIL" in user:
+        CALLS.append("plan"); return r({"title": "Broken loop", "summary": "s", "reply": "ok",
+          "plan": {"goal": "read files"},
+          "current_task": [{"id": "l1", "action": "list_files", "pattern": "*", "save_as": "docs"},
+            {"id": "l2", "action": "for_each", "source": "docs", "steps": [
+              {"id": "r", "action": "read_file", "path": "{{item}}_missing", "as_data": True}]}]})
+    if P.INIT_SCHEMA in system and "RESCUEME" in user:
+        CALLS.append("plan"); return r({"title": "Verify code", "summary": "s", "reply": "ok",
+          "plan": {"goal": "enter the verification code", "destination": {"start_url": B + "/rescue.html"}},
+          "current_task": [{"id": "s1", "action": "open_url", "url": B + "/rescue.html"},
+            {"id": "s2", "action": "fill", "target": "verification code box", "value": "4242"},
+            {"id": "s3", "action": "click", "target": "Send button", "validation": {"text_contains": "Verify"}}]})
+    if P.INIT_SCHEMA in system and "ANALYSIS" in system and "PATCHME" in user:
+        assert P.ADAPT_HINT in user and '"id": "s4"' in user, user[-600:]
+        CALLS.append("plan"); return r({"title": "Patched", "summary": "s", "reply": "adapted",
+          "plan_updates": {"output": {"filename": "patched.md"}},
+          "step_changes": {"replace": [{"id": "s4", "limit": 2}]}})
     if P.INIT_SCHEMA in system and "ANALYSIS" in system:
         assert "read_file" in system and "extract_records" not in system and "upload" not in system
         CALLS.append("plan"); return r({"title":"Browser agent papers","summary":"s","reply":"Planning analysis.",
@@ -42,7 +79,7 @@ def fake_complete(self, system, messages, max_tokens=None, json_mode=False):
             {"id":"s2","action":"fill","target":"search box","value":"browser agent"},
             {"id":"s3","action":"click","target":"Search button"},
             {"id":"s4","action":"collect_links","target":"paper result titles","limit":3,"save_as":"papers"},
-            {"id":"s5","action":"for_each","source":"papers","steps":[{"id":"a","action":"open_url","url":"{{item}}"},{"id":"b","action":"get_page_data"}]},
+            {"id":"s5","action":"for_each","source":"papers","dedupe":True,"steps":[{"id":"a","action":"open_url","url":"{{item}}"},{"id":"b","action":"get_page_data"}]},
             {"id":"s6","action":"analyze","instructions":"short"}]})
     if P.INIT_SCHEMA in system and "AUTOMATION" in system:
         CALLS.append("plan"); return r({"title":"Apply jobs","summary":"s","reply":"ok",
@@ -81,7 +118,8 @@ def fake_complete(self, system, messages, max_tokens=None, json_mode=False):
         CALLS.append("pick")
         lines = user.split("Candidates:\n")[1].splitlines()
         want = "input" if '"fill"' in user else "button"
-        idx = next(i for i,l in enumerate(lines) if f"<{want}" in l)
+        idx = next((i for i,l in enumerate(lines) if f"<{want}" in l), -1)
+        if idx < 0: return r({"index": -1, "need": "broader"})
         return r({"index": idx})
     if system == P.PICK_LINKS:
         CALLS.append("links")
@@ -90,7 +128,7 @@ def fake_complete(self, system, messages, max_tokens=None, json_mode=False):
     if system == P.PATTERN:
         CALLS.append("pattern")
         assert "div.card" in user, user[:500]
-        return r({"item_selector":"div.card","fields":{"title":{"selector":"h2.title","attr":"text"},"price":{"selector":"span.price","attr":"text"},"url":{"selector":"a","attr":"href"}},"pagination":"next","next_selector":"a.next"})
+        return r({"item_selector":"div.card","fields":{"title":{"selector":"h2.title","attr":"text"},"price":{"selector":"span.price","attr":"text"},"url":{"selector":"a","attr":"href"}},"pagination":"next","next_selector":"a[href=\"/products2.html\"]"})  # page-specific, like real models
     if system == P.VALIDATE:
         CALLS.append("validate"); return r({"ok": True, "problems": ""})
     if system == P.ANALYZE_REDUCE:
@@ -133,11 +171,63 @@ key = "Captcha challenges block scraping bots; courts debate the legal status of
 docs, st = R.select([filler[:6000] + NL + key + NL + filler[6000:]], "legal issues of scraping and captcha bots", 3000)
 assert st["after"] <= 3200 and key in docs[0], st          # relevant paragraph survives a 4x cut
 assert R.select(["short"], "x", 3000)[0] == ["short"]       # within budget: untouched
+big = NL.join([f"<div class=\"row\">filler line {i} about nothing</div>" for i in range(400)]
+              + ["<form id=\"login\">", " <span>Newsletter signup</span>", "  <button>Subscribe now</button>"]
+              + [f"<p>more filler {i}</p>" for i in range(200)])
+fo = pr.focus_outline(big, "newsletter subscribe button", max_chars=1500)
+assert 0 < len(fo) <= 1500 and "Subscribe now" in fo and '<form id="login">' in fo, fo   # match + ancestor
+assert pr.focus_outline("<p>small</p>", "small") == ""                                   # small: use full
+lk = ([{"text": f"Study {chr(65+i)}x{chr(70+i)} on agents", "href": f"http://h/p{i}", "chrome": False} for i in range(12)]
+      + [{"text": f"Cited by {i}", "href": f"http://h/c{i}", "chrome": False} for i in range(12)]
+      + [{"text": f"Menu {i}", "href": f"http://h/m{i}", "chrome": True} for i in range(5)])
+off = pr.links_to_offer(lk, "paper result titles", 3)
+assert [l["href"] for l in off] == [f"http://h/p{i}" for i in range(12)], off             # repeats + menu cut
+assert len(pr.links_to_offer(lk, "cited by counts", 3)) == 24                           # hint names them: kept
+assert len(pr.links_to_offer(lk[:4] + lk[-5:], "papers", 3)) == 9                       # too few: nothing cut
+from ecogent.memory import normalize_request
+assert normalize_request("Scrape  Books, under $20!") == normalize_request("scrape books under $20")
 from ecogent.llm import LLMRouter
 cs = Settings(); cs.local_llm.provider = "compatible"; cs.local_llm.base_url = "http://x"
 rt = LLMRouter(cs)
 assert rt._client_for("pick") is rt.local and rt._client_for("analyze_map") is rt.local
 assert rt._client_for("plan") is rt.main and rt._client_for("analyze") is rt.main
+login = '<html><head><title>Sign in - Shop</title></head><body><form><input name="user"><input type="password" name="pw"></form></body></html>'
+assert pr.detect_login_wall(login, "https://shop.com/account/login?next=/orders")
+assert not pr.detect_login_wall(login.replace('type="password"', 'type="password" hidden'), "https://shop.com/login")
+assert not pr.detect_login_wall("<html><body><input type=password></body></html>", "https://shop.com/settings/security")
+from ecogent import toolbox as TB
+assert TB.guess({"action": "Browser", "url": "x"}, "scraping") == "open_url"
+assert TB.guess({"action": "Page data", "label": "b", "step_name": "Extract book records"}, "scraping") == "extract_records"
+assert TB.guess({"action": "Results"}, "scraping") == "write_output" and TB.guess({"action": "Results"}, "analysis") == "analyze"
+assert TB.guess({"action": "Browser", "target": "Search button", "step_name": "click search"}, "analysis") == "click"
+assert TB.guess({"action": "zzz"}, "analysis") == "" and "[Browser" not in TB.catalog("analysis")
+from ecogent.core import _find_steps, ensure_deliverable
+nested = {"plan": {"goal": "g", "current_task": [{"id": "s1", "action": "open_url"}]}}
+assert _find_steps(nested) == [{"id": "s1", "action": "open_url"}] and "current_task" not in nested["plan"]
+st = [{"id": "s1", "action": "open_url"}, {"id": "s2", "action": "extract_records"}]
+ensure_deliverable(st, "scraping"); assert st[-1]["action"] == "write_output" and st[-1]["id"] == "s3", st
+st = [{"id": "s1", "action": "for_each", "steps": [{"id": "b", "action": "get_page_data"}]}]
+ensure_deliverable(st, "analysis"); assert st[-1]["action"] == "analyze", st
+st = [{"id": "s1", "action": "extract_records"}, {"id": "s2", "action": "write_output"}]
+ensure_deliverable(st, "scraping"); assert len(st) == 2
+from ecogent.scraping import apply_pattern
+card = '<div class="q"><span class="t">Hi</span><a class="tag">life</a><a class="tag">love</a></div>'
+pat = {"item_selector": "div.q", "fields": {"text": {"selector": "span.t"}, "tags": {"selector": "a.tag", "many": True},
+       "first": {"selector": "a.tag"}}}
+assert apply_pattern(pat, card, "http://h/") == [{"text": "Hi", "tags": "life, love", "first": "life"}]
+from ecogent.core import ensure_start
+st = [{"id": "s1", "action": "fill", "target": "search box", "value": "x"}]
+ensure_start(st, {"destination": {"start_url": "https://a.com"}})
+assert st[0] == {"id": "s0", "step_name": "Open start page", "action": "open_url", "url": "https://a.com"}, st
+st = [{"id": "s1", "action": "list_files"}]; ensure_start(st, {"destination": {"start_url": "https://a.com"}}); assert len(st) == 1
+res = '<div class="r"><h3 class="t"><a href="/a1">One</a></h3></div>' * 1 + ''.join(
+    f'<div class="r"><h3 class="t"><a href="/a{i}">Title {i}</a></h3></div>' for i in range(2, 5)) + '<nav><a href="/x">About</a></nav>'
+assert [l["href"] for l in pr.result_group(pr.links(res, "http://h/"))] == ["http://h/a1", "http://h/a2", "http://h/a3", "http://h/a4"]
+assert pr.result_group(pr.links('<a href="/1">a</a><a href="/2">b</a>', "http://h/")) == []
+from ecogent import output as OUT
+import tempfile, os
+tmp = Path(tempfile.mkdtemp()) / "empty.csv"
+assert OUT.write_rows([], tmp, columns=["title", "price"]).read_text(encoding="utf-8-sig").strip() == "title,price"
 print("UNIT OK")
 
 s = Settings(); s.home = str(HOME); s.headless = True; s.use_vector_memory = False; s.main_llm.api_key = "x"; s.ensure_dirs()
@@ -180,6 +270,25 @@ try:
     CALLS.clear(); agent.handle_message(a.id, "run it again")
     print("RERUN (local follow-up) calls:", CALLS)
     assert CALLS == [] and agent.session(a.id).meta["status"] == "done"
+    # ---- same request in a NEW chat: the finished plan is reused, no planning call, warm selectors
+    CALLS.clear()
+    a2 = agent.new_chat("analysis", headless=True)
+    agent.handle_message(a2.id, "search papers about browser agents, and summarize to MD")
+    a2 = agent.session(a2.id); st = a2.plan["runs"][-1]["stats"]
+    print("EXACT REPEAT status:", a2.meta["status"], "calls:", CALLS, "stats:", st)
+    assert a2.meta["status"] == "done" and CALLS == [] and st["llm_lookups"] == 0, (CALLS, st)   # shared analysis cache
+    assert len(a2.plan["data"]["temp_files"]) == 3
+    # the earlier chat was switched to docx by a follow-up: the new chat gets what ITS request asks (md)
+    assert a2.plan["data"]["output_file"].endswith(".md"), a2.plan["data"]["output_file"]
+    # ---- similar request: the planner answers with a patch of the earlier plan
+    CALLS.clear()
+    a3 = agent.new_chat("analysis", headless=True)
+    agent.handle_message(a3.id, "Search papers about browser agents and summarize to md PATCHME")
+    a3 = agent.session(a3.id); st = a3.plan["runs"][-1]["stats"]
+    print("PATCHED PLAN status:", a3.meta["status"], "calls:", CALLS, "output:", a3.plan["data"].get("output_file"))
+    assert a3.meta["status"] == "done" and CALLS == ["plan", "analyze"], CALLS
+    assert a3.plan["data"]["output_file"].endswith("patched.md") and len(a3.plan["data"]["temp_files"]) == 2
+    assert [x["id"] for x in a3.current_task] == ["s1", "s2", "s3", "s4", "s5", "s6"]
     # ---- token budget: headless cannot approve more, so the run stops before the next LLM call
     s.max_run_tokens = 1
     b = agent.new_chat("analysis", headless=True)
@@ -194,12 +303,18 @@ try:
     agent.handle_message(sc.id, "scrape baby products under $50")
     sc = agent.session(sc.id)
     print("SCRAPE status:", sc.meta["status"], "calls:", CALLS, "records:", sc.plan["data"]["records_count"], sc.plan["data"]["output_file"])
-    assert sc.plan["data"]["records_count"] == 4, sc.plan["data"]   # $10.99..$40.99 across 2 pages
+    assert sc.plan["data"]["records_count"] == 6, sc.plan["data"]   # page 2 has no match: page 3 still scraped
     CALLS.clear()
     agent.rerun(sc.id)
     sc = agent.session(sc.id)
     print("SCRAPE RERUN calls:", CALLS, "records:", sc.plan["data"]["records_count"])
     assert CALLS == []
+    CALLS.clear()
+    sc2 = agent.new_chat("scraping", headless=True)
+    agent.handle_message(sc2.id, "Scrape baby products under $50.")
+    sc2 = agent.session(sc2.id)
+    print("SCRAPE EXACT REPEAT calls:", CALLS, "records:", sc2.plan["data"]["records_count"])
+    assert CALLS == [] and sc2.plan["data"]["records_count"] == 6 and sc2.meta["status"] == "done", CALLS
     # ---- automation
     CALLS.clear()
     au = agent.new_chat("automation", headless=True)
@@ -237,6 +352,45 @@ try:
     assert ot.meta["status"] == "done" and Path(ot.plan["data"]["output_file"]).exists()
     from ecogent import toolbox
     assert not toolbox.allowed("analyze", "scraping") and not toolbox.allowed("extract_records", "analysis")
+    # ---- a loop where EVERY item fails is a failed step, not "done"
+    CALLS.clear()
+    lf = agent.new_chat("others", headless=True)
+    lf.update_meta(work_folder=str(WORK))
+    agent.handle_message(lf.id, "read my files LOOPFAIL")
+    lf = agent.session(lf.id); ex = lf.plan["execution"]["steps"]
+    print("BROKEN LOOP status:", lf.meta["status"], "calls:", CALLS, "error:", ex["l2"].get("error", "")[:90])
+    assert lf.meta["status"] == "failed" and "items all failed" in ex["l2"]["error"], (lf.meta, ex["l2"])
+    assert CALLS.count("heal") == 3, CALLS                         # stopped after 3 of 4 items
+    assert CALLS.count("heal") <= s.max_heals_per_run, CALLS        # bounded, no heal of the loop itself
+    # ---- a guessed URL returns 404: the real page is found by its link, free, and saved
+    CALLS.clear()
+    ty = agent.new_chat("others", headless=True)
+    agent.handle_message(ty.id, "read article one TYPO404")
+    ty = agent.session(ty.id)
+    print("TYPO 404 status:", ty.meta["status"], "calls:", CALLS, "url now:", ty.current_task[0]["url"])
+    assert ty.meta["status"] == "done" and CALLS == ["plan"] and ty.current_task[0]["url"].endswith("/article1.html"), CALLS
+    assert len(ty.plan["data"]["temp_files"]) == 1
+    # ---- ReAct fallback: the code box is hidden until "Show form" is clicked; heal gives up
+    CALLS.clear()
+    rc = agent.new_chat("others", headless=True)
+    agent.handle_message(rc.id, "enter my verification code RESCUEME")
+    rc = agent.session(rc.id); st = rc.plan["runs"][-1]["stats"]
+    print("RESCUE status:", rc.meta["status"], "calls:", CALLS, "stats:", st)
+    assert rc.meta["status"] == "done" and CALLS.count("rescue") == 2 and st["rescued"] == 1, (CALLS, st)
+    assert CALLS.count("pick") <= 1, CALLS          # the hidden box is never offered to the LLM
+    assert agent.browser.page.input_value("input[name=code]") == "4242"      # the step's value, not the LLM's
+    ids = [x["id"] for x in rc.current_task]
+    assert ids == ["s1", "s2_r1", "s2", "s3"] and rc.current_task[1]["optional"], rc.current_task
+    CALLS.clear(); agent.rerun(rc.id); rc = agent.session(rc.id); st = rc.plan["runs"][-1]["stats"]
+    print("RESCUE RERUN calls:", CALLS, "stats:", st)
+    assert rc.meta["status"] == "done" and CALLS == [] and st["rescued"] == 0, (CALLS, st)
+    # the popup/prep element is gone next time: the optional prep step is skipped with no LLM call
+    page = SITE / "rescue.html"
+    page.write_text(page.read_text().replace('<button id="toggle"', '<button id="toggle" hidden')
+                    .replace('style="display:none"', ''))
+    CALLS.clear(); agent.rerun(rc.id); rc = agent.session(rc.id); st = rc.plan["runs"][-1]["stats"]
+    print("RESCUE RERUN (no prep needed) calls:", CALLS, "stats:", st)
+    assert rc.meta["status"] == "done" and CALLS == [] and st["steps_skipped"] == 1, (CALLS, st)
     # ---- software test placeholder
     st = agent.new_chat("software_test", headless=True)
     CALLS.clear(); agent.handle_message(st.id, "test login page")
