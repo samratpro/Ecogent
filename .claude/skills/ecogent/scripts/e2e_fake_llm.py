@@ -187,9 +187,9 @@ assert len(pr.links_to_offer(lk[:4] + lk[-5:], "papers", 3)) == 9               
 from ecogent.memory import normalize_request
 assert normalize_request("Scrape  Books, under $20!") == normalize_request("scrape books under $20")
 from ecogent.llm import LLMRouter
-cs = Settings(); cs.local_llm.provider = "compatible"; cs.local_llm.base_url = "http://x"
+cs = Settings(); cs.cheap_llm.provider = "compatible"; cs.cheap_llm.base_url = "http://x"
 rt = LLMRouter(cs)
-assert rt._client_for("pick") is rt.local and rt._client_for("analyze_map") is rt.local
+assert rt._client_for("pick") is rt.cheap and rt._client_for("analyze_map") is rt.cheap
 assert rt._client_for("plan") is rt.main and rt._client_for("analyze") is rt.main
 login = '<html><head><title>Sign in - Shop</title></head><body><form><input name="user"><input type="password" name="pw"></form></body></html>'
 assert pr.detect_login_wall(login, "https://shop.com/account/login?next=/orders")

@@ -9,6 +9,7 @@ Theme tags are global DPG aliases - never reuse one as a widget tag.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import dearpygui.dearpygui as dpg
@@ -24,7 +25,8 @@ BORDER = (36, 43, 60)
 BORDER_SOFT = (27, 33, 47)
 TEXT = (241, 245, 249)
 MUTED = (203, 213, 225)
-FAINT = (148, 163, 184)
+SUBTLE = (172, 184, 202)      # secondary text (help lines, field labels): readable on dark surfaces
+FAINT = (148, 163, 184)       # tertiary only (timestamps, placeholders)
 PRIMARY = (99, 102, 241)      # indigo-500
 PRIMARY_HOVER = (129, 140, 248)
 PRIMARY_ACTIVE = (79, 70, 229)
@@ -51,6 +53,30 @@ ICONS = {
 }
 
 FONTS: dict[str, int] = {}
+UI_SCALE = 1.0
+
+
+def enable_dpi_awareness() -> float:
+    """Call before the viewport exists. Without it Windows bitmap-stretches the whole window
+    on any display scale other than 100% (blurry text). Returns the display scale (1.0 = 96 dpi)
+    so fonts can be rasterized at the real pixel size instead."""
+    global UI_SCALE
+    if sys.platform != "win32":
+        return UI_SCALE
+    import ctypes
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)      # per-monitor aware
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            return UI_SCALE
+    try:
+        dpi = ctypes.windll.user32.GetDpiForSystem()
+    except Exception:
+        dpi = 96
+    UI_SCALE = max(1.0, dpi / 96)
+    return UI_SCALE
 
 
 def load_fonts() -> None:
@@ -59,7 +85,7 @@ def load_fonts() -> None:
         "body": ("segoeui.ttf", 19),
         "semibold": ("seguisb.ttf", 19),
         "small": ("segoeui.ttf", 16),
-        "label": ("seguisb.ttf", 14),
+        "label": ("seguisb.ttf", 15),
         "title": ("seguisb.ttf", 24),
         "h1": ("seguisb.ttf", 34),
         "h2": ("seguisb.ttf", 21),
@@ -70,11 +96,12 @@ def load_fonts() -> None:
         for name, (file, size) in files.items():
             path = folder / file
             if path.exists():
-                FONTS[name] = dpg.add_font(str(path), size)   # DPG 2.x loads glyph ranges on demand
+                # Whole pixel sizes at the real DPI: fractional sizes rasterize soft.
+                FONTS[name] = dpg.add_font(str(path), round(size * UI_SCALE))   # glyphs load on demand
         icon_file = next((folder / n for n in ("SegoeIcons.ttf", "segmdl2.ttf") if (folder / n).exists()), None)
         if icon_file:
             for name, size in (("icon", 18), ("icon_sm", 15), ("icon_lg", 26)):
-                FONTS[name] = dpg.add_font(str(icon_file), size)
+                FONTS[name] = dpg.add_font(str(icon_file), round(size * UI_SCALE))
     if "body" in FONTS:
         dpg.bind_font(FONTS["body"])
 
@@ -193,9 +220,20 @@ def setup_themes() -> None:
         with dpg.theme_component(dpg.mvInputText):
             dpg.add_theme_color(dpg.mvThemeCol_Border, BORDER)
             dpg.add_theme_style(dpg.mvStyleVar_FrameBorderSize, 1)
-        with dpg.theme_component(dpg.mvCombo):
-            dpg.add_theme_color(dpg.mvThemeCol_Border, BORDER)
+        for comp in (dpg.mvCombo, dpg.mvInputInt, dpg.mvInputFloat):
+            with dpg.theme_component(comp):
+                dpg.add_theme_color(dpg.mvThemeCol_Border, BORDER)
+                dpg.add_theme_style(dpg.mvStyleVar_FrameBorderSize, 1)
+        # Checkboxes: a visible box (border + lighter fill) and a bright tick; smaller padding = smaller box.
+        with dpg.theme_component(dpg.mvCheckbox):
+            dpg.add_theme_color(dpg.mvThemeCol_FrameBg, SURFACE_2)
+            dpg.add_theme_color(dpg.mvThemeCol_FrameBgHovered, SURFACE_3)
+            dpg.add_theme_color(dpg.mvThemeCol_FrameBgActive, (46, 55, 78))
+            dpg.add_theme_color(dpg.mvThemeCol_Border, (90, 105, 130))
+            dpg.add_theme_color(dpg.mvThemeCol_CheckMark, (255, 255, 255))
             dpg.add_theme_style(dpg.mvStyleVar_FrameBorderSize, 1)
+            dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 4, 4)
+            dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 4)
     dpg.bind_theme(global_theme)
 
     _button_theme("btn_primary", PRIMARY, PRIMARY_HOVER, PRIMARY_ACTIVE, text=(255, 255, 255))
@@ -239,6 +277,18 @@ def setup_themes() -> None:
         with dpg.theme_component(dpg.mvAll):
             dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 6, 0)
 
+    # Selectable text (read-only input that looks like a plain label): no frame, no padding.
+    with dpg.theme(tag="text_select"):
+        with dpg.theme_component(dpg.mvInputText):
+            for col in (dpg.mvThemeCol_FrameBg, dpg.mvThemeCol_FrameBgHovered, dpg.mvThemeCol_FrameBgActive):
+                dpg.add_theme_color(col, (0, 0, 0, 0))
+            dpg.add_theme_color(dpg.mvThemeCol_Text, TEXT)
+            dpg.add_theme_color(dpg.mvThemeCol_TextSelectedBg, (99, 102, 241, 140))
+            dpg.add_theme_style(dpg.mvStyleVar_FrameBorderSize, 0)
+            dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 0, 2)
+            dpg.add_theme_style(dpg.mvStyleVar_ScrollbarSize, 0)
+    _button_theme("btn_copy", (0, 0, 0, 0), SURFACE_2, SURFACE_3, text=FAINT, rounding=6, pad=(6, 1))
+
     # Composer input: borderless and transparent so the composer card is the visible field.
     with dpg.theme(tag="input_bare"):
         with dpg.theme_component(dpg.mvInputText):
@@ -252,7 +302,7 @@ def setup_themes() -> None:
 # --------------------------------------------------------------------------- helpers
 def section_label(text: str, parent=0):
     kw = {"parent": parent} if parent else {}
-    return font(dpg.add_text(text.upper(), color=FAINT, **kw), "label")
+    return font(dpg.add_text(text.upper(), color=SUBTLE, **kw), "label")
 
 
 def rich_button(parent, height: int, theme: str, callback=None, user_data=None, width: int = -1):

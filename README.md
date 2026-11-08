@@ -48,14 +48,14 @@ Click **Settings**:
   |---|---|---|
   | OpenAI | `https://api.openai.com/v1` | required |
   | OpenRouter | `https://openrouter.ai/api/v1` | required (one key, many models) |
-  | Ollama (local) | `http://localhost:11434/v1` | not needed |
-  | Custom OpenAI-compatible | your server, e.g. LM Studio `http://localhost:1234/v1`, Groq `https://api.groq.com/openai/v1`, vLLM / llama.cpp server | if the server needs one |
+  | Custom OpenAI-compatible | any compatible API, e.g. Groq `https://api.groq.com/openai/v1`, Together, DeepSeek | usually required |
   | Anthropic | `https://api.anthropic.com` | required |
 
   Press **Test connection / fetch models**, then choose a model from the list (or type it).
-- **Cheap model** (optional, recommended) - a cheaper model from any provider (e.g. `gpt-4o-mini`,
-  a flash/haiku model, or a local server) for simple jobs. Ticked by default: `pick`, `validate`,
-  `analyze_map` (per-page notes), `classify`, `repair`. Planning and the final analysis stay on the main model.
+- **Cheap model** (optional, recommended) - Ecogent uses two API models: the main (strong) model and a
+  cheaper one (e.g. `gpt-4o-mini`, a flash/haiku model) for low-level jobs. Ticked by default: `pick`,
+  `validate`, `analyze_map` (per-page notes), `classify`, `repair`. Planning, healing and the final
+  analysis stay on the main model. There is no local / tiny model.
 - **General** - temp / output / browser-profile folders, browser path (empty = auto-detect),
   headless or graphics mode by default.
 
@@ -152,7 +152,7 @@ folder if none is selected. They can only touch the chat, temp, output and selec
 | `relevance.py` | BM25 relevance filter: only goal-relevant page parts go to the analysis LLM |
 | `browser.py` | Wraps [playwright_browser_manager](https://github.com/samratpro/playwright_browser_manager) |
 | `page_reader.py` | BeautifulSoup candidates, cleaned page text, repeated blocks |
-| `llm.py`, `prompts.py` | Providers (retry/backoff, JSON mode, prompt caching), main/local routing, token accounting incl. cached tokens, system prompts |
+| `llm.py`, `prompts.py` | Providers (retry/backoff, JSON mode, prompt caching), main/cheap model routing, token accounting incl. cached tokens, system prompts |
 | `memory.py` | ChromaDB lookup of similar earlier plans (reuses their selectors) |
 | `scheduler.py`, `worker.py`, `bridge.py` | Periodic runs, worker thread, agent <-> GUI requests |
 | `integration.py` | Tool-call entry point for other agents (task type + intent) |

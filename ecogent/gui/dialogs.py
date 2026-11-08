@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import threading
 from dataclasses import asdict
@@ -17,7 +18,10 @@ from . import style as st
 from .style import DANGER, SUCCESS
 from ..scheduler import describe
 
-from .style import FAINT as MUTED, WARNING as WARN
+from .style import SUBTLE as MUTED, WARNING as WARN
+
+SYSTEM_LANG = "(system default)"
+LANGUAGES = ("en-US", "en-GB", "bn-BD", "hi-IN", "de-DE", "fr-FR", "es-ES", "ar-SA", "zh-CN", "ja-JP", SYSTEM_LANG)
 
 
 def _pos(w: int, h: int) -> list[int]:
@@ -105,11 +109,14 @@ class NewTaskDialog(Dialog):
         "auto": ("spark", "Detect it from the prompt"),
     }
     CARD_W, CARD_H = 252, 78
+    TEMP, NEW = "(temporary profile)", "+ New profile..."
 
     def __init__(self, settings: Settings, profiles: list[str], prompt: str, on_create: Callable[[dict], None],
-                 task_type: str = ""):
+                 task_type: str = "", on_open_browser: Optional[Callable[[str, str, str], None]] = None):
         super().__init__("New task", 830, 760)
         self.on_create = on_create
+        self.on_open_browser = on_open_browser
+        self.opened: set[str] = set()
         types = TASK_TYPES + ["auto"]
         self.ttype = task_type if task_type in types else ("auto" if prompt else TASK_TYPES[0])
         self.cards: dict[str, int] = {}
@@ -129,24 +136,126 @@ class NewTaskDialog(Dialog):
                     self.cards[t] = btn
         self._pick(None, None, self.ttype)
         dpg.add_spacer(height=2, parent=p)
-        with dpg.group(horizontal=True, horizontal_spacing=16, parent=p):
-            with dpg.group():
-                st.section_label("Title (optional)")
-                self.title_w = dpg.add_input_text(width=380, hint="e.g. Baby products under $50")
-            with dpg.group():
-                st.section_label("Browser profile")
-                self.profile_w = dpg.add_combo(["(temporary profile)"] + profiles, default_value="(temporary profile)",
-                                               width=-1)
-        self.headless_w = dpg.add_checkbox(label="Headless (no browser window)", default_value=settings.headless, parent=p)
+        st.section_label("Title (optional)", parent=p)
+        self.title_w = dpg.add_input_text(width=-1, hint="e.g. Baby products under $50", parent=p)
+
+        langs = list(LANGUAGES)
+        cur = settings.browser_language or SYSTEM_LANG
+        hdr = dpg.add_collapsing_header(label="Browser  -  profile, language, waits, login",
+                                        default_open=False, parent=p)
+        default = settings.default_profile if settings.default_profile in profiles else self.TEMP
+        # One aligned grid: label | control | label | control | extra.
+        with dpg.table(header_row=False, policy=dpg.mvTable_SizingFixedFit, borders_innerH=False,
+                       borders_outerH=False, borders_innerV=False, borders_outerV=False,
+                       pad_outerX=False, parent=hdr):
+            for _ in range(5):
+                dpg.add_table_column()
+            with dpg.table_row():
+                self._grid_label("Profile", "Saved browser profile: keeps cookies and logins between runs,\n"
+                                            "so sites see the same browser every time (far fewer captchas).")
+                self.profile_w = dpg.add_combo(profiles + [self.TEMP, self.NEW], default_value=default,
+                                               width=220, callback=self._profile_pick)
+                self._grid_label("Language", "Browser language (Accept-Language header).")
+                self.lang_w = dpg.add_combo(langs if cur in langs else [cur] + langs, default_value=cur, width=130)
+                self.headless_w = dpg.add_checkbox(label="Headless", default_value=settings.headless)
+            with dpg.table_row():
+                self._grid_label("Page wait", "Extra pause after every page opens, for slow sites or\n"
+                                              "pages that load their content late. 0 = no pause.")
+                with dpg.group(horizontal=True, horizontal_spacing=6):
+                    self.page_wait_w = dpg.add_input_int(default_value=settings.page_wait_s, width=70, step=0,
+                                                         min_value=0, max_value=120, min_clamped=True,
+                                                         max_clamped=True)
+                    dpg.add_text("sec", color=MUTED)
+                self._grid_label("Bot-check", "When a page shows a verification screen ('Just a moment...',\n"
+                                              "'Checking your browser'), wait this long for it to pass by\n"
+                                              "itself before asking you to solve it. 0 = ask right away.")
+                with dpg.group(horizontal=True, horizontal_spacing=6):
+                    self.bot_wait_w = dpg.add_input_int(default_value=settings.bot_check_wait_s, width=70, step=0,
+                                                        min_value=0, max_value=300, min_clamped=True,
+                                                        max_clamped=True)
+                    dpg.add_text("sec", color=MUTED)
+                dpg.add_text("")
+        self.new_name_w = dpg.add_input_text(width=220, hint="new profile name", show=False, parent=hdr)
+        dpg.add_separator(parent=hdr)
+        st.font(dpg.add_text("Log in or solve a captcha ahead of time (optional)", color=MUTED, parent=hdr), "small")
+        with dpg.group(horizontal=True, horizontal_spacing=10, parent=hdr):
+            self.url_w = dpg.add_input_text(width=-150, hint="Site URL, e.g. https://scholar.google.com")
+            self.open_btn = b = dpg.add_button(label="Open browser", width=-1, callback=self._open_browser)
+            dpg.bind_item_theme(b, "btn_secondary")
+            with dpg.tooltip(b):
+                dpg.add_text("Opens the selected profile at this URL. Log in / solve the captcha,\n"
+                             "then CLOSE the window: the session is saved and reused on every run.")
+        # Right under the button (the user looks here while the browser is open); hidden when empty.
+        self.browser_msg_w = dpg.add_text("", color=WARN, wrap=740, show=False, parent=hdr)
+        dpg.add_spacer(height=2, parent=hdr)
         st.section_label("Task prompt (optional - you can also type it in the chat)", parent=p)
         self.prompt_w = dpg.add_input_text(multiline=True, default_value=prompt, width=-1, height=120, parent=p)
         self.msg_w = dpg.add_text("", color=WARN, parent=p)
         self.row_buttons("Create task", self.ok)
 
+    @staticmethod
+    def _grid_label(text: str, tip: str) -> None:
+        w = dpg.add_text(text, color=MUTED)
+        with dpg.tooltip(w):
+            dpg.add_text(tip)
+
+    def _browser_status(self, text: str, color=WARN) -> None:
+        dpg.configure_item(self.browser_msg_w, color=color, show=bool(text))
+        dpg.set_value(self.browser_msg_w, text)
+
     def _pick(self, sender, app_data, ttype):
         self.ttype = ttype
         for t, btn in self.cards.items():
             dpg.bind_item_theme(btn, "type_card_active" if t == ttype else "type_card")
+
+    def _profile_pick(self, sender, value):
+        dpg.configure_item(self.new_name_w, show=value == self.NEW)
+
+    def _lang(self) -> str:
+        lang = dpg.get_value(self.lang_w)
+        return "" if lang == SYSTEM_LANG else lang
+
+    def _profile_name(self) -> Optional[str]:
+        """Selected profile ("" = temporary), or None (message shown) when a new one has no name."""
+        profile = dpg.get_value(self.profile_w)
+        if profile == self.NEW:
+            profile = re.sub(r"[^\w.-]+", "_", dpg.get_value(self.new_name_w).strip()).strip("_.")
+            if not profile:
+                dpg.set_value(self.msg_w, "Enter a name for the new browser profile.")
+                return None
+        return "" if profile == self.TEMP else profile
+
+    def _open_browser(self, *_):
+        profile = self._profile_name()
+        if profile is None:
+            return
+        if not profile:
+            self._browser_status(color=WARN, text="Pick or create a profile first - a temporary profile is not kept.")
+            return
+        if not self.on_open_browser:
+            return
+        self.on_open_browser(profile, dpg.get_value(self.url_w).strip(), self._lang())
+        self.opened.add(profile)
+        if dpg.get_value(self.profile_w) == self.NEW:
+            items = dpg.get_item_configuration(self.profile_w)["items"]
+            if profile not in items:
+                dpg.configure_item(self.profile_w, items=items[:-1] + [profile, self.NEW])
+            dpg.set_value(self.profile_w, profile)
+            self._profile_pick(None, profile)
+        dpg.configure_item(self.open_btn, label="Browser is open...", enabled=False)
+        self._browser_status(color=WARN, text=f"Browser opening for '{profile}'. Log in / solve the captcha there, then CLOSE "
+                                  "that browser window. This message changes when the session is saved.")
+
+    def profile_done(self, profile: str, error: str = "") -> None:
+        """The profile setup job ended (called by the app when the user closed the browser)."""
+        if not dpg.does_item_exist(self.tag):
+            return
+        dpg.configure_item(self.open_btn, label="Open browser", enabled=True)
+        if error:
+            self._browser_status(color=DANGER, text=f"Could not open the browser for '{profile}': {error[:200]}")
+            return
+        self._browser_status(color=SUCCESS, text=f"Browser closed - session saved in profile '{profile}'. "
+                                  "You can create the task now.")
 
     def ok(self, *_):
         prompt = dpg.get_value(self.prompt_w).strip()
@@ -154,9 +263,17 @@ class NewTaskDialog(Dialog):
         if ttype == "auto" and not prompt:
             dpg.set_value(self.msg_w, "Write the task prompt so Ecogent can detect the type.")
             return
-        profile = dpg.get_value(self.profile_w)
+        is_new = dpg.get_value(self.profile_w) == self.NEW
+        profile = self._profile_name()
+        if profile is None:
+            return
+        # A new profile that was not opened yet is set up before the task (queued first on the worker).
+        new_profile_url = (dpg.get_value(self.url_w).strip() or "about:blank") \
+            if is_new and profile not in self.opened else ""
         result = {"task_type": ttype, "title": dpg.get_value(self.title_w).strip(),
-                  "profile": "" if profile.startswith("(") else profile,
+                  "profile": profile, "new_profile_url": new_profile_url,
+                  "browser_lang": self._lang(),
+                  "page_wait": dpg.get_value(self.page_wait_w), "bot_wait": dpg.get_value(self.bot_wait_w),
                   "headless": dpg.get_value(self.headless_w), "prompt": prompt}
         self.close()
         self.on_create(result)
@@ -175,19 +292,28 @@ class SettingsDialog(Dialog):
                 self._path("output_dir", "Output folder  (default <home>/output)", settings.output_dir, True)
                 self._path("profile_dir", "Browser profiles  (default <home>/profiles)", settings.profile_dir, True)
                 self._path("browser_path", "Browser executable  (empty = auto-detect)", settings.browser_path, False)
+                self.w["browser_language"] = dpg.add_input_text(
+                    label="Browser language (e.g. en-US; empty = system / IP default)",
+                    default_value=settings.browser_language, width=160)
                 self.w["debug_port"] = dpg.add_input_int(label="Debug port", default_value=settings.debug_port, width=160)
                 self.w["page_timeout_ms"] = dpg.add_input_int(label="Page timeout (ms)", default_value=settings.page_timeout_ms, width=160)
+                self.w["page_wait_s"] = dpg.add_input_int(label="Page wait after each load (s, new tasks)",
+                                                          default_value=settings.page_wait_s, width=160)
+                self.w["bot_check_wait_s"] = dpg.add_input_int(label="Bot-check wait before asking you (s, new tasks)",
+                                                               default_value=settings.bot_check_wait_s, width=160)
                 self.w["headless"] = dpg.add_checkbox(label="Headless mode by default (otherwise graphics mode)", default_value=settings.headless)
             with dpg.tab(label="Main LLM") as self.main_tab:
-                self.main = self._llm(settings.main_llm, ["openai", "openrouter", "ollama", "compatible", "anthropic"])
+                dpg.add_text("The strong model: planning, healing and the final analysis.", color=MUTED)
+                self.main = self._llm(settings.main_llm, ["openai", "openrouter", "compatible", "anthropic"])
             with dpg.tab(label="Cheap model"):
-                self.local = self._llm(settings.local_llm, ["none", "openai", "openrouter", "anthropic", "compatible", "ollama"])
-                dpg.add_text("Simple jobs routed to a cheaper model (e.g. gpt-4o-mini, a flash/haiku model).")
-                dpg.add_text("Planning and the final analysis stay on the main model unless ticked here:")
+                dpg.add_text("Optional second model for low-level jobs (e.g. gpt-4o-mini, a flash / haiku model).",
+                             color=MUTED)
+                self.cheap = self._llm(settings.cheap_llm, ["none", "openai", "openrouter", "anthropic", "compatible"])
+                dpg.add_text("Jobs sent to the cheap model (the rest use the main model):")
                 self.purposes = {}
                 with dpg.group(horizontal=True):
                     for p in LLM_PURPOSES:
-                        self.purposes[p] = dpg.add_checkbox(label=p, default_value=p in settings.local_purposes)
+                        self.purposes[p] = dpg.add_checkbox(label=p, default_value=p in settings.cheap_purposes)
             with dpg.tab(label="Advanced"):
                 for key, label in (("max_heal_attempts", "Max heal attempts per step"),
                                    ("scrape_sample_size", "Scraping sample size"),
@@ -214,9 +340,8 @@ class SettingsDialog(Dialog):
     PROVIDER_HINTS = {
         "openai": "OpenAI API - needs an API key (platform.openai.com).",
         "openrouter": "OpenRouter - one key for many models, e.g. 'openai/gpt-4o-mini', 'meta-llama/llama-3.1-70b-instruct'.",
-        "ollama": "Ollama on this PC - no key needed. Start Ollama and pull a model first (ollama pull qwen2.5).",
-        "compatible": "Any OpenAI-compatible server: LM Studio http://localhost:1234/v1, Groq https://api.groq.com/openai/v1,\n"
-                      "Together https://api.together.xyz/v1, vLLM / llama.cpp server http://localhost:8000/v1 ...",
+        "compatible": "Any OpenAI-compatible API, e.g. Groq https://api.groq.com/openai/v1, "
+                      "Together https://api.together.xyz/v1, DeepSeek https://api.deepseek.com/v1",
         "anthropic": "Anthropic Messages API - needs an API key.",
         "none": "Disabled - every job uses the main LLM.",
     }
@@ -239,8 +364,7 @@ class SettingsDialog(Dialog):
                                       width=260, callback=on_provider)
         hint = dpg.add_text(self.PROVIDER_HINTS.get(current, ""), color=MUTED)
         w["base_url"] = dpg.add_input_text(label="Base URL", default_value=cfg.base_url, width=520)
-        w["api_key"] = dpg.add_input_text(label="API key", default_value=cfg.api_key, password=True, width=520,
-                                          hint="not needed for Ollama / local servers")
+        w["api_key"] = dpg.add_input_text(label="API key", default_value=cfg.api_key, password=True, width=520)
         with dpg.group(horizontal=True):
             w["model"] = dpg.add_input_text(label="Model", default_value=cfg.model, width=300)
             models = dpg.add_combo([], width=200, no_preview=False, default_value="pick from list",
@@ -279,9 +403,9 @@ class SettingsDialog(Dialog):
 
     def ok(self, *_):
         data = asdict(self.settings)
-        for key in ("home", "temp_dir", "output_dir", "profile_dir", "browser_path"):
+        for key in ("home", "temp_dir", "output_dir", "profile_dir", "browser_path", "browser_language"):
             data[key] = dpg.get_value(self.w[key]).strip()
-        for key in ("debug_port", "page_timeout_ms", "max_heal_attempts", "scrape_sample_size",
+        for key in ("debug_port", "page_timeout_ms", "page_wait_s", "bot_check_wait_s", "max_heal_attempts", "scrape_sample_size",
                     "max_page_chars", "analysis_direct_chars", "analysis_budget_chars", "max_heals_per_run",
                     "max_rescue_turns", "max_rescues_per_run", "max_run_tokens", "headless", "use_vector_memory"):
             data[key] = dpg.get_value(self.w[key])
@@ -290,8 +414,8 @@ class SettingsDialog(Dialog):
             return
         s = Settings._from_dict(data)
         s.main_llm = self._llm_from(self.main)
-        s.local_llm = self._llm_from(self.local)
-        s.local_purposes = [p for p, w in self.purposes.items() if dpg.get_value(w)]
+        s.cheap_llm = self._llm_from(self.cheap)
+        s.cheap_purposes = [p for p, w in self.purposes.items() if dpg.get_value(w)]
         self.close()
         self.on_save(s)
 
@@ -432,7 +556,8 @@ class ProfilesDialog(Dialog):
                      color=MUTED, wrap=570, parent=self.tag)
         self.list = dpg.add_listbox([], num_items=7, width=-1, parent=self.tag)
         self.name = dpg.add_input_text(label="Profile name", width=360, parent=self.tag)
-        self.url = dpg.add_input_text(label="Login URL", default_value="https://", width=360, parent=self.tag)
+        self.url = dpg.add_input_text(label="Destination URL", hint="https://example.com/login  (opened in the browser)",
+                                      width=360, parent=self.tag)
         self.msg = dpg.add_text("", color=WARN, parent=self.tag)
         with dpg.group(horizontal=True, parent=self.tag):
             dpg.bind_item_theme(dpg.add_button(label="Open browser to log in", callback=self.setup), "btn_primary")

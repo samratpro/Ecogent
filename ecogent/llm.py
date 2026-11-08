@@ -1,7 +1,7 @@
 """
 LLM access.
 
-LLMClient talks to one provider over plain HTTP: OpenAI, OpenRouter, Ollama or any
+LLMClient talks to one provider over plain HTTP: OpenAI, OpenRouter or any
 OpenAI-compatible server (/chat/completions), or Anthropic (/v1/messages).
 LLMRouter sends simple jobs (element picking, validation, per-page notes, ...) to the
 cheap model when one is configured and everything else to the main model,
@@ -297,15 +297,15 @@ class LLMRouter:
                  log: Optional[Callable[[str], None]] = None):
         self.settings = settings
         self.main = LLMClient(settings.main_llm)
-        self.local = LLMClient(settings.local_llm) if settings.local_llm.enabled else None
+        self.cheap = LLMClient(settings.cheap_llm) if settings.cheap_llm.enabled else None
         self.on_usage = on_usage
         self.log = log
         # Called before every call with the purpose; may raise BudgetExceeded (set per run).
         self.before_call: Optional[Callable[[str], None]] = None
 
     def _client_for(self, purpose: str) -> LLMClient:
-        if self.local and purpose in self.settings.local_purposes:
-            return self.local
+        if self.cheap and purpose in self.settings.cheap_purposes:
+            return self.cheap
         return self.main
 
     def ask(self, purpose: str, system: str, user: str, max_tokens: Optional[int] = None,

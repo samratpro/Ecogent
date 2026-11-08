@@ -5,8 +5,31 @@ description: Work on the Ecogent browser agent in this repo (ecogent/ package, D
 
 # Ecogent development
 
-The design spec is `Ecogent_Works_Doc/how_work.md`; it is the only source of truth for behaviour.
+The design spec is `Ecogent_Works_Doc/how_work.md`; it is the only source of truth for behaviour
+(except its "Tiny Local LLM" technology line, which is outdated - see Project scope).
 `research/` and the `Ecogent_Works_Doc/*_research.md` files are thesis/literature notes, not code.
+
+## Project scope (decided 2026-11-08)
+- Ecogent is a **browser-only agent**. The earlier plan (a general "standard" agent with a local
+  tiny-LLM "NLP Supervisor" routing to Coding / Browser / Testing sub-agents) was dropped.
+- **No local / tiny model.** Two API models only: the main (strong) model and an optional cheap
+  model for low-level jobs (`cheap_llm` + `cheap_purposes`; the cheap model took the old tiny
+  model's role). Do not add Ollama / localhost model support back.
+- **The paper drafts are invalid.** `research/Ecogent_Thesis_Proposal_Draft/` (and the
+  `research/Proposal/` material) describe the old plan - do not use them as a spec, do not cite
+  their claims, and do not edit them. The paper will be rewritten from scratch by the user
+  **after the benchmark**.
+- **Benchmark plan:** compare Ecogent against other browser agents (e.g. browser-use, Stagehand,
+  Skyvern) and general agents with browsing (e.g. Claude, Antigravity, Perplexity) on tokens /
+  dollar cost, success rate and repeat-run cost, including deliberate site changes. Contribution
+  claim to test: after the first run, LLM cost scales with site drift, not task length (cheapest-
+  first element ladder, healing only broken steps, per-task-type reuse policies).
+- **Target: IEEE publication.** Benchmark work must be reproducible: scripted drift levels on local
+  copies / self-hosted sites, N runs, model + price per dollar figure, measurable baselines
+  (browser-use, Stagehand cache+selfHeal, compile-once-no-repair, Ecogent without the ladder).
+  Consumer agents (Claude app, Perplexity, Antigravity) report no tokens: success/time only.
+  Prior art the paper must cite: Agentic Compilation (arXiv 2604.09718), Agentic Plan Caching,
+  AgentRR, Stagehand, workflow-use, Similo, AutoCrawler.
 
 ## Core idea (keep it intact)
 Ecogent exists to cut LLM token cost. The LLM only plans, picks elements that cannot be found
@@ -27,7 +50,7 @@ path is a regression - check the tests and the cost rules below.
 | `llm.py` | HTTP clients (OpenAI-compatible `/chat/completions`, Anthropic `/v1/messages`): retry/backoff on 429/5xx/network, JSON mode (auto-off if the server rejects it), cacheable system prompt, usage incl. `cached_input_tokens`. `LLMRouter`: main vs cheap model by purpose, `:fallback` purpose when the cheap model fails, `before_call` hook, `ask_json` -> free `_repair` -> cheap `repair` call (broken reply only) |
 | `prompts.py` | All prompts/schemas. `system(type, ...)` = terse `CORE` + `toolbox.catalog(type)` + type guide; `heal_system(type)` is the short heal prompt |
 | `toolbox.py` / `tools.py` | Tool registry (per task type, compact `catalog`) / sandboxed built-in file operations |
-| `config.py` | `Settings`, `PROVIDERS`, `LLM_PURPOSES`, `CHEAP_PURPOSES_DEFAULT`, `NOT_IMPLEMENTED_TYPES` |
+| `config.py` | `Settings`, `PROVIDERS`, `LLM_PURPOSES`, `CHEAP_PURPOSES_DEFAULT`, `NOT_IMPLEMENTED_TYPES`; browser: `default_profile` ("default", persistent, created on first use; "" = temp), `page_wait_s`, `bot_check_wait_s` (per-task overrides in chat meta `page_wait` / `bot_wait`) |
 | `storage.py` | `ChatSession`: `<home>/chats/<id>/` plan.json, current_task.json, steps.json, chat.json (usage by purpose incl. cached tokens), user_info.json |
 | `memory.py` | ChromaDB (fallback difflib) similar-plan lookup; `exact` (same normalized request via `normalize_request`, index stores `request`); `compact_plan_reference` |
 | `bridge.py` | `UIBridge` events + blocking requests (hold, confirm, sample, user_info, choose); `HeadlessBridge` never blocks (confirm -> None) |
@@ -67,6 +90,11 @@ Memory lives in `plan.execution.steps[<key>]` (`MEMORY_FIELDS`); a templated tar
 - `collect_links`: PICK_LINKS returning [] falls back to `pr.result_group` (one clear repeated content-link group).
 - Scraping with 0 matching records writes a header-only file; the validator is told when its sample is unfiltered.
 - Every run starts without `output_file`. Real-LLM runs: visible browser, the user solves captchas (popup).
+- Captchas / bot walls (all free): `open_url` with HTTP 403/429 -> `_wait_out_blocker` (re-checks a
+  verification screen for `bot_wait` s, Cloudflare passes by itself) else `NeedsUser` - never heal / `_find_by_link`.
+  After a hold, `_after_human` waits for redirects and `_resumed` lets `open_url` skip reloading when
+  `browser.same_page(url)`; `browser.goto` survives "interrupted by another navigation". New tasks use the
+  persistent `default` profile (cookies keep Google's captcha exemption); a temp profile gets captchas.
 
 ## Cost rules (check every change against these)
 - Reruns must make 0 LLM calls for scraping/automation and for analysis with unchanged sources.
@@ -81,8 +109,10 @@ Memory lives in `plan.execution.steps[<key>]` (`MEMORY_FIELDS`); a templated tar
 ## Settings that affect cost (`ecogent_data/settings.json`, Advanced tab)
 `max_heal_attempts` (2/step), `max_heals_per_run` (6), `max_rescue_turns` (3, 0 = off), `max_rescues_per_run` (2), `max_run_tokens` (150000, 0 = off),
 `analysis_budget_chars` (24000, 0 = off), `analysis_direct_chars` (30000), `max_page_chars` (12000),
-`scrape_sample_size` (15). Cheap model = `local_llm` + `local_purposes` (JSON keys kept for old files;
-provider "none" = off, then everything goes to the main model).
+`scrape_sample_size` (15). Cheap model = `cheap_llm` + `cheap_purposes` (old `local_llm` /
+`local_purposes` keys are read and migrated by `Settings._from_dict`; an old Ollama/localhost config
+is reset by `_api_only`; provider "none" = off, then everything goes to the main model).
+Providers: openai, openrouter, compatible (any OpenAI-compatible API), anthropic.
 
 ## Rules that bite
 - **Threads:** all Playwright/BrowserManager calls run on the worker thread (sync API + shared

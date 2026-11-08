@@ -20,6 +20,7 @@ import hashlib
 import json
 import re
 import threading
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -92,6 +93,7 @@ class Executor:
         self.run_heals = 0              # LLM heals in this run (all steps and for_each items)
         self.run_rescues = 0            # steps sent to the ReAct fallback in this run
         self.force_visible = False      # set after a captcha in headless mode
+        self._resumed = False           # the next attempt follows a user hold (captcha solved)
         self._tok_frames: list[int] = []    # tokens used by nested steps, per open run_step
         self._budget_start = self._tokens()
         self._budget_limit = settings.max_run_tokens
@@ -170,7 +172,8 @@ class Executor:
     def _ensure_browser(self) -> None:
         meta = self.session.meta
         headless = False if self.force_visible else meta.get("headless")
-        self.browser.ensure(profile=meta.get("profile", ""), headless=headless)
+        self.browser.ensure(profile=meta.get("profile", ""), headless=headless, lang=meta.get("browser_lang"))
+        self.browser.extra_wait_ms = 1000 * self._task_wait("page_wait", "page_wait_s")
 
     def _show_browser(self) -> None:
         """A human cannot solve a captcha in an invisible browser: reopen it visibly on the same page."""
@@ -185,8 +188,46 @@ class Executor:
         if url.startswith(("http://", "https://")):
             self.browser.goto(url)
 
+    def _after_human(self) -> None:
+        """The user pressed Continue: let a redirect started by their captcha answer finish
+        before the step runs again (Google: google_abuse cookie -> sgsync -> results)."""
+        if not self.browser.alive:
+            return
+        try:
+            self.browser._settle_redirects()
+        except Exception:
+            pass
+
+    def _task_wait(self, meta_key: str, setting: str) -> int:
+        """A wait in seconds: the task's own value (New task dialog) or the Settings default."""
+        v = self.session.meta.get(meta_key)
+        try:
+            return max(0, int(v if v is not None else getattr(self.settings, setting, 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def _wait_out_blocker(self, html: Optional[str] = None) -> Optional[str]:
+        """Bot check on the page? Many pass by themselves ("Just a moment...", "Checking your
+        browser"): re-check for up to the task's bot-check wait before a human is asked.
+        Returns the reason if it is still there. Free: no LLM, only page reads."""
+        reason = pr.detect_blocker(self.browser.html() if html is None else html)
+        wait = self._task_wait("bot_wait", "bot_check_wait_s")
+        if not reason or wait <= 0 or not self.browser.alive:
+            return reason
+        self.log(f"Verification screen ({reason}); waiting up to {wait}s for it to pass by itself")
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            self.check_stop()
+            self.browser.page.wait_for_timeout(1000)
+            reason = pr.detect_blocker(self.browser.html())
+            if not reason:
+                self.browser._settle_redirects()
+                self.log("Verification passed by itself")
+                return None
+        return reason
+
     def _check_blocker(self) -> None:
-        reason = pr.detect_blocker(self.browser.html())
+        reason = self._wait_out_blocker()
         if reason:
             raise NeedsUser(f"Possible captcha/challenge on {self.browser.url} ({reason}). "
                             "Solve it in the browser window, then press Continue.")
@@ -255,7 +296,10 @@ class Executor:
             action = current.get("action", "")
             self.ui.emit("status", self.chat_id, text=f"{key}: {current.get('step_name', action)}")
             try:
-                result = self.dispatch(current, key)
+                try:
+                    result = self.dispatch(current, key)
+                finally:
+                    self._resumed = False       # only the attempt right after a hold may use it
                 self.validate(current)
                 r = self.rec(key)
                 r.update(status="ok", last_ok=now_iso(), error="", runs=r.get("runs", 0) + 1)
@@ -282,6 +326,8 @@ class Executor:
                         except Exception as be:  # noqa: BLE001 - still ask the user
                             self.log(f"Could not open a visible browser: {be}")
                     if self.ui.hold(self.chat_id, str(e)):
+                        self._resumed = True
+                        self._after_human()
                         continue
                     raise StopRequested("aborted by user")
 
@@ -322,6 +368,8 @@ class Executor:
                                  "captcha/login is on the page; trying the page itself first")
                     elif d == "ask_user":
                         if self.ui.hold(self.chat_id, decision.get("message") or err):
+                            self._resumed = True
+                            self._after_human()
                             continue
                         raise StopRequested("aborted by user")
 
@@ -344,6 +392,8 @@ class Executor:
                         except Exception as be:  # noqa: BLE001 - still ask the user
                             self.log(f"Could not open a visible browser: {be}")
                         if self.ui.hold(self.chat_id, res[5:]):
+                            self._resumed = True
+                            self._after_human()
                             continue
                         raise StopRequested("aborted by user")
 
@@ -400,9 +450,17 @@ class Executor:
         return getattr(self, f"act_{action}")(step, key)
 
     # ---- browser tools
+    CHALLENGE_STATUS = (403, 429)   # bot walls answer with these; not a wrong address
+
     def act_open_url(self, step: dict, key: str) -> None:
         url = self.render(step.get("url", ""))
         fb = self.render(step.get("fallback_url", ""))
+        if self._resumed and self.browser.same_page(url) and not pr.detect_blocker(self.browser.html()):
+            # The user just solved a captcha and the site already brought them to this page.
+            # Loading it again would hit the bot check again (and races the site's redirect).
+            self.log(f"{key}: already on the page after your help; not reloading it")
+            self._check_session(url)
+            return
         try:
             status = self.browser.goto(url)
         except Exception:
@@ -410,6 +468,17 @@ class Executor:
                 raise
             self.log(f"{url} failed, trying fallback {fb}")
             status, fb = self.browser.goto(fb), ""
+        if status in self.CHALLENGE_STATUS:
+            # Google Scholar & co. answer 429/403 with a captcha page. Healing (LLM) or searching
+            # the site root would only add requests and deepen the block: hand it to the human.
+            # Cloudflare's automatic check is also a 403 and passes by itself: wait for it first.
+            html = self.browser.html()
+            if pr.detect_blocker(html) and not self._wait_out_blocker(html):
+                status = 200            # the check passed; we are on the real page now
+            else:
+                reason = pr.detect_blocker(self.browser.html()) or f"HTTP {status}, the site is blocking automated visits"
+                raise NeedsUser(f"Possible captcha/challenge on {pr.short_url(self.browser.url)} ({reason}). "
+                                "Solve it in the browser window (or wait a minute), then press Continue.")
         if status >= 400 and fb:
             self.log(f"{url} returned HTTP {status}, trying fallback {fb}")
             status = self.browser.goto(fb)
@@ -726,9 +795,11 @@ class Executor:
         had_memory = bool(mem.get("selector"))
 
         html = self.browser.html()
-        reason = pr.detect_blocker(html)
+        reason = pr.detect_blocker(html) and self._wait_out_blocker(html)
         if reason:
             raise NeedsUser(f"Possible captcha/challenge ({reason}). Solve it in the browser, then Continue.")
+        if pr.detect_blocker(html):
+            html = self.browser.html()      # the check passed: read the real page
 
         if had_memory:
             sel = self._local_refind(mem, html, action, target)
@@ -911,7 +982,9 @@ class Executor:
         for _ in range(turns):
             self.check_stop()
             html = self.browser.html()
-            reason = pr.detect_blocker(html)
+            reason = pr.detect_blocker(html) and self._wait_out_blocker(html)
+            if pr.detect_blocker(html) and not reason:
+                html = self.browser.html()
             if reason:
                 return f"user:Possible captcha/challenge ({reason}). Solve it in the browser, then Continue."
             cands = self._visible(pr.candidates(html, step.get("action", "click"),

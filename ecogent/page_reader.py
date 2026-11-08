@@ -24,6 +24,8 @@ TEXT_INPUT_TYPES = {"", "text", "search", "email", "tel", "url", "password", "nu
 BLOCKER_PATTERNS = [
     "captcha", "unusual traffic", "verify you are human", "are you a robot", "not a robot",
     "press and hold", "security check", "checking your browser",
+    # automatic checks (Cloudflare & co.) that usually pass by themselves after a few seconds
+    "verifying you are human", "just a moment", "checking if the site connection is secure",
 ]
 
 # ---- token diet: what never needs to reach the LLM

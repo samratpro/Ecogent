@@ -230,9 +230,13 @@ class EcogentAgent:
         return Executor(s, self.browser, self.router(s), self.ui, self.settings, self.stop)
 
     # ------------------------------------------------------------------ chats
-    def new_chat(self, task_type: str, title: str = "", profile: str = "", headless: Optional[bool] = None) -> ChatSession:
+    def new_chat(self, task_type: str, title: str = "", profile: Optional[str] = None,
+                 headless: Optional[bool] = None) -> ChatSession:
+        """profile None = settings.default_profile (persistent); "" = temporary profile."""
         if task_type not in TASK_TYPES:
             raise ValueError(f"unknown task type {task_type}")
+        if profile is None:
+            profile = self.settings.default_profile
         s = ChatSession.create(self.settings.chats_path, self.settings.temp_path, self.settings.output_path,
                                task_type, title or f"New {TASK_LABELS[task_type]} task", profile,
                                self.settings.headless if headless is None else headless)
@@ -436,7 +440,7 @@ class EcogentAgent:
                 if not ok:
                     return False
                 self.ui.emit("status", s.id, text="Waiting for you to log in and close the browser...")
-                self.browser.setup_profile(name, url)
+                self.browser.setup_profile(name, url, s.meta.get("browser_lang"))
             s.update_meta(profile=name)
 
         fields = [f for f in (req.get("user_info_fields") or []) if isinstance(f, str)]

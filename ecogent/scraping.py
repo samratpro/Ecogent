@@ -290,7 +290,7 @@ class ScrapeEngine:
                     self.log(f"Next page failed: {e}")
                     break
                 self._wait_for_new(pattern, raw)
-                if pr.detect_blocker(b.html()) and not ex.ui.hold(ex.chat_id, "Captcha on the next page. Solve it, then Continue."):
+                if ex._wait_out_blocker() and not ex.ui.hold(ex.chat_id, "Captcha on the next page. Solve it, then Continue."):
                     break
             else:
                 break

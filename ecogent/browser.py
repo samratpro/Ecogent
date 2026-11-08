@@ -12,11 +12,44 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+import subprocess as _subprocess
+
 from playwright_browser_manager import BrowserManager
+from playwright_browser_manager import browser_manager as _bm_module
 
 from .config import Settings
 
 Log = Callable[[str], None]
+
+
+# BrowserManager builds the browser command line itself and offers no way to add flags.
+# Without --lang / --accept-lang a fresh profile sends the OS / IP-derived language, so
+# Google shows e.g. Bengali. The shim below adds the flags only to BrowserManager's own
+# Popen calls (the module's `subprocess` name is replaced, the real module is untouched).
+_EXTRA_ARGS: list[str] = []
+
+
+def language_args(lang: str) -> list[str]:
+    lang = (lang or "").strip()
+    if not lang:
+        return []
+    base = lang.split("-")[0]
+    accept = lang if base == lang else f"{lang},{base}"
+    return [f"--lang={lang}", f"--accept-lang={accept}"]
+
+
+class _SubprocessShim:
+    def __getattr__(self, name):
+        return getattr(_subprocess, name)
+
+    @staticmethod
+    def Popen(args, *a, **kw):
+        if isinstance(args, list) and args and _EXTRA_ARGS:
+            args = [args[0], *_EXTRA_ARGS, *args[1:]]
+        return _subprocess.Popen(args, *a, **kw)
+
+
+_bm_module.subprocess = _SubprocessShim()
 
 
 class BrowserError(Exception):
@@ -42,6 +75,8 @@ class BrowserSession:
         self.page = None
         self.profile = ""
         self.headless = False
+        self.lang = ""
+        self.extra_wait_ms = 0          # the task's "page wait": pause after every page load
 
     # ------------------------------------------------------------------ lifecycle
     def _browser_path(self) -> Optional[str]:
@@ -72,23 +107,35 @@ class BrowserSession:
         except Exception:
             return False
 
-    def ensure(self, profile: str = "", headless: Optional[bool] = None) -> None:
+    def _set_language(self, lang: Optional[str]) -> str:
+        """lang None = settings default; "" = system language (no flags)."""
+        lang = (self.settings.browser_language if lang is None else lang).strip()
+        _EXTRA_ARGS[:] = language_args(lang)
+        return lang
+
+    def ensure(self, profile: str = "", headless: Optional[bool] = None, lang: Optional[str] = None) -> None:
         headless = self.settings.headless if headless is None else headless
-        if self.alive and profile == self.profile and headless == self.headless:
+        want_lang = (self.settings.browser_language if lang is None else lang).strip()
+        if self.alive and profile == self.profile and headless == self.headless and want_lang == self.lang:
             return
         self.close()
+        self.lang = self._set_language(want_lang)
         self.manager = self._new_manager()
         timeout = self.settings.page_timeout_ms
         if profile:
             if not self.manager.profile_exists(profile):
-                raise BrowserError(f"Browser profile '{profile}' does not exist. Create it in Profiles.")
+                if profile != self.settings.default_profile:
+                    raise BrowserError(f"Browser profile '{profile}' does not exist. Create it in Profiles.")
+                # The default profile is created on first use; the browser fills the empty folder.
+                Path(self.manager.get_profile_path(profile)).mkdir(parents=True, exist_ok=True)
+                self.log(f"Created the persistent browser profile '{profile}' (cookies are kept between runs)")
             self.page = self.manager.connect_to_browser(profile_name=profile, headless=headless, timeout=timeout)
         else:
             self.page = self.manager.connect_to_browser_without_profile(headless=headless, timeout=timeout)
         self.page.set_default_timeout(timeout)
         self.profile, self.headless = profile, headless
         self.log(f"Browser ready ({'profile ' + profile if profile else 'temp profile'}, "
-                 f"{'headless' if headless else 'graphics'} mode)")
+                 f"{'headless' if headless else 'graphics'} mode, language {self.lang or 'system'})")
 
     def close(self) -> None:
         if self.manager:
@@ -98,9 +145,10 @@ class BrowserSession:
                 self.log(f"Browser close warning: {e}")
         self.manager, self.page = None, None
 
-    def setup_profile(self, name: str, url: str = "") -> None:
-        """Open a real browser window for manual login; returns when the user closes it."""
+    def setup_profile(self, name: str, url: str = "", lang: Optional[str] = None) -> None:
+        """Open a real browser window at `url` (destination) for manual login; returns when the user closes it."""
         self.close()
+        self._set_language(lang)
         manager = self._new_manager()
         manager.setup_profile(profile_name=name, url=url or None,
                               wait_message="Log in / solve challenges, then CLOSE the browser to save the session.")
@@ -151,12 +199,48 @@ class BrowserSession:
             raise BrowserError(f"only http/https pages can be opened, not '{scheme}:' (local files go through the file tools)")
         if not scheme:
             url = "https://" + url
-        resp = self.page.goto(url, wait_until="domcontentloaded")
+        try:
+            resp = self.page.goto(url, wait_until="domcontentloaded")
+        except Exception as e:
+            # Sites redirect by script while our goto is in flight (Google after a captcha:
+            # google_abuse cookie -> sgsync -> the real page). The browser did navigate; wait
+            # for the redirect chain to finish instead of failing the step.
+            if "interrupted by another navigation" not in str(e) and "net::ERR_ABORTED" not in str(e):
+                raise
+            self.log("Page redirected while loading; waiting for it to settle")
+            self._settle_redirects()
+            self._extra_wait()
+            return 0
         self._settle()
+        self._extra_wait()
         try:
             return int(resp.status) if resp is not None else 0
         except Exception:
             return 0
+
+    def _extra_wait(self) -> None:
+        if self.extra_wait_ms > 0:
+            self.page.wait_for_timeout(self.extra_wait_ms)
+
+    def _settle_redirects(self, rounds: int = 6) -> None:
+        """Wait until the URL stops changing (script redirect chains)."""
+        last = ""
+        for _ in range(rounds):
+            self._settle()
+            if self.url == last:
+                return
+            last = self.url
+
+    def same_page(self, url: str) -> bool:
+        """The open page is `url` (host + path + query; trailing slash and fragment ignored)."""
+        from urllib.parse import urlparse, parse_qsl
+        if not self.alive:
+            return False
+        a = urlparse(url if "://" in url else "https://" + url)
+        b = urlparse(self.url)
+        host = lambda h: h.lower().removeprefix("www.")
+        return (host(a.netloc) == host(b.netloc) and a.path.rstrip("/") == b.path.rstrip("/")
+                and sorted(parse_qsl(a.query)) == sorted(parse_qsl(b.query)))
 
     def exists(self, selector: str) -> bool:
         try:
@@ -226,10 +310,13 @@ class BrowserSession:
             loc.scroll_into_view_if_needed(timeout=t)
         except Exception:
             pass                    # the click below reports the real problem
+        url = self.page.url
         loc.click(timeout=t)
         self.page.wait_for_timeout(1000)
         self._follow_new_tab(before)
         self._settle()
+        if self.page.url != url:        # the click opened another page: same pause as goto
+            self._extra_wait()
 
     def fill(self, selector: str, value: str) -> None:
         loc = self.page.locator(selector).first

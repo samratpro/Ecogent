@@ -115,6 +115,11 @@ class EcogentApp:
         self.json_dirty = {key: False for key, *_ in JSON_TABS}
         self.json_path: dict[str, Optional[Path]] = {key: None for key, *_ in JSON_TABS}
         self._scroll_chat = 0
+        self._chat_boxes: list[tuple[int, str]] = []    # selectable chat texts (box, original text)
+        self._chat_wrap_w = 0
+        self._line_h = 0.0
+        self._tw_cache: dict[str, float] = {}
+        self._copy_reset: list[tuple[int, int]] = []
         self._scroll_log = 0
         self._welcome_indent: tuple = ()
         self._welcome_cards: list[int] = []
@@ -153,7 +158,7 @@ class EcogentApp:
                 with dpg.group() as brand:
                     dpg.bind_item_theme(brand, "tight")
                     st.font(dpg.add_text("Ecogent"), "h2")
-                    st.font(dpg.add_text("token-efficient browser agent", color=st.FAINT), "small")
+                    st.font(dpg.add_text("token-efficient browser agent", color=st.SUBTLE), "small")
             dpg.add_spacer(height=4)
             card, _ = st.rich_button(0, 42, "btn_primary", callback=lambda: self.new_task())
             st.put_icon(card, "add", 84, 13, color=(255, 255, 255), size="icon_sm")
@@ -162,7 +167,7 @@ class EcogentApp:
                                callback=lambda: self.refresh_chats())
             with dpg.group(horizontal=True):
                 st.section_label("Tasks")
-                st.font(dpg.add_text("", tag="task_count", color=st.FAINT), "label")
+                st.font(dpg.add_text("", tag="task_count", color=st.SUBTLE), "label")
             dpg.add_child_window(tag="chat_list", height=-(4 * 44 + 18), border=False)
             dpg.bind_item_theme(dpg.last_item(), "list")
             dpg.add_separator()
@@ -220,7 +225,7 @@ class EcogentApp:
     def _stat(self, tag: str, label: str, width: int) -> None:
         with dpg.child_window(width=width, height=76, border=True, no_scrollbar=True):
             dpg.bind_item_theme(dpg.last_item(), "tile")
-            st.font(dpg.add_text(label, color=st.FAINT), "small")
+            st.font(dpg.add_text(label, color=st.SUBTLE), "small")
             st.font(dpg.add_text("-", tag=tag), "stat")
 
     def _build_chat(self) -> None:
@@ -235,7 +240,7 @@ class EcogentApp:
             dpg.bind_item_theme(dpg.add_button(label="Folder", callback=self.pick_work_folder), "btn_ghost")
             with dpg.tooltip(dpg.last_item()):
                 dpg.add_text("Selected folder for the built-in file tools (list/read/write/copy/...)")
-            st.font(dpg.add_text("", tag="chat_folder", color=st.FAINT), "small")
+            st.font(dpg.add_text("", tag="chat_folder", color=st.SUBTLE), "small")
             st.icon_button("delete", "Delete this task", self.delete_chat, theme="btn_ghost", fallback="Delete")
         self._build_welcome()
         dpg.add_child_window(tag="chat_view", height=-(COMPOSER_H + 10), border=False, show=False)
@@ -249,7 +254,7 @@ class EcogentApp:
                 st.icon_button("send", "Send (Enter)", lambda: self.send(), theme="btn_primary",
                                width=52, height=52, fallback="Send")
             st.font(dpg.add_text("Enter to send  ·  Ctrl+Enter for a new line  ·  "
-                                 "follow-ups reuse the saved plan", color=st.FAINT), "small")
+                                 "follow-ups reuse the saved plan", color=st.SUBTLE), "small")
 
     def _build_welcome(self) -> None:
         with dpg.child_window(tag="welcome", height=-(COMPOSER_H + 10), border=False):
@@ -273,7 +278,7 @@ class EcogentApp:
                             self._welcome_cards.append(card)
                             st.put_icon(card, ic, 20, 22, color=st.PRIMARY_HOVER, size="icon_lg")
                             st.put_text(card, title, 66, 14, "semibold")
-                            st.put_text(card, desc, 66, 44, "small", color=st.FAINT)
+                            st.put_text(card, desc, 66, 44, "small", color=st.SUBTLE)
 
     def _build_json_tab(self, key: str, filename: str, editable: bool) -> None:
         with dpg.group(horizontal=True):
@@ -282,7 +287,7 @@ class EcogentApp:
             if editable:
                 dpg.bind_item_theme(dpg.add_button(label="Save edits", user_data=key,
                                                    callback=lambda s, a, u: self._save_json(u)), "btn_primary")
-            st.font(dpg.add_text(filename, tag=f"{key}_path", color=st.FAINT), "small")
+            st.font(dpg.add_text(filename, tag=f"{key}_path", color=st.SUBTLE), "small")
         w = dpg.add_input_text(tag=f"{key}_text", multiline=True, width=-1, height=-1,
                                readonly=not editable, tab_input=True, user_data=key,
                                callback=lambda s, a, u: self.json_dirty.__setitem__(u, True))
@@ -290,6 +295,7 @@ class EcogentApp:
 
     # ------------------------------------------------------------------ run
     def run(self) -> None:
+        st.enable_dpi_awareness()       # before any window exists, or Windows stretches it (blurry text)
         dpg.create_context()
         dpg.configure_app(manual_callback_management=True)
         st.load_fonts()
@@ -304,7 +310,7 @@ class EcogentApp:
         self.refresh_chats()
         llm = self.settings.main_llm
         if PROVIDERS.get(llm.provider, {}).get("needs_key") and not llm.api_key:
-            self.log("Set your LLM provider (OpenAI, OpenRouter, Ollama or any OpenAI-compatible API) "
+            self.log("Set your LLM provider (OpenAI, OpenRouter, Anthropic or any OpenAI-compatible API) "
                      "in Settings before the first task.")
         try:
             while dpg.is_dearpygui_running():
@@ -350,6 +356,12 @@ class EcogentApp:
                 dpg.configure_item("welcome_inner", indent=indent)
                 for card in self._welcome_cards:
                     dpg.configure_item(card, width=card_w)
+        self._rewrap_chat()
+        for i, (btn, left) in enumerate(self._copy_reset):
+            self._copy_reset[i] = (btn, left - 1)
+            if left <= 1 and dpg.does_item_exist(btn):
+                dpg.configure_item(btn, label="Copy")
+        self._copy_reset = [(b, n) for b, n in self._copy_reset if n > 0]
         # Scroll max is only known after the new items were laid out.
         if self._scroll_chat:
             self._scroll_chat -= 1
@@ -400,8 +412,11 @@ class EcogentApp:
             s.update_meta(**kw)
 
     def _profiles(self) -> list[str]:
+        """Saved profiles; the default one is listed first even before its first use creates it."""
         p = self.settings.profile_path
-        return sorted(d.name for d in p.iterdir() if d.is_dir()) if p.exists() else []
+        names = sorted(d.name for d in p.iterdir() if d.is_dir()) if p.exists() else []
+        d = self.settings.default_profile
+        return ([d] if d else []) + [n for n in names if n != d]
 
     def _profile_changed(self, sender, value) -> None:
         self._update_meta(profile="" if value.startswith("(") else value)
@@ -426,7 +441,7 @@ class EcogentApp:
             st.put_text(card, st.truncate(m.get("title") or m["id"], 25), 30, 6, "semibold")
             meta = "  ·  ".join(x for x in (TASK_LABELS.get(m.get("task_type"), ""), status,
                                                   _ago(m.get("updated", ""))) if x)
-            st.put_text(card, meta, 30, 32, "small", color=st.FAINT)
+            st.put_text(card, meta, 30, 32, "small", color=st.SUBTLE)
 
     def _highlight_current(self) -> None:
         for card in dpg.get_item_children("chat_list", 1) or []:
@@ -459,11 +474,12 @@ class EcogentApp:
         self._show_task_view(True)
         dpg.set_value("top_title", st.truncate(meta.get("title") or chat_id, 60))
         dpg.configure_item("chat_type", label=f"  {TASK_LABELS.get(meta.get('task_type'), '-')}  ")
-        dpg.configure_item("chat_profile", items=["(temporary profile)"] + self._profiles())
+        dpg.configure_item("chat_profile", items=self._profiles() + ["(temporary profile)"])
         dpg.set_value("chat_profile", meta.get("profile") or "(temporary profile)")
         dpg.set_value("chat_headless", bool(meta.get("headless")))
         dpg.set_value("chat_folder", meta.get("work_folder") or "no folder selected (output folder)")
         dpg.delete_item("chat_view", children_only=True)
+        self._chat_boxes = []
         for m in s.chat.get("messages", []):
             self._append_chat(m["role"], m["text"], m.get("time", ""))
         for key, filename, *_ in JSON_TABS:
@@ -487,12 +503,100 @@ class EcogentApp:
             with dpg.group():
                 with dpg.group(horizontal=True, horizontal_spacing=8):
                     st.font(dpg.add_text("You" if user else "Ecogent"), "semibold")
-                    st.font(dpg.add_text(stamp, color=st.FAINT), "small")
+                    st.font(dpg.add_text(stamp, color=st.SUBTLE), "small")
+                    cp = dpg.add_button(label="Copy", user_data=text.strip(), callback=self._copy_message)
+                    dpg.bind_item_theme(cp, "btn_copy")
+                    st.font(cp, "small")
+                    with dpg.tooltip(cp):
+                        dpg.add_text("Copy this message")
                 bubble = dpg.add_child_window(width=-48, auto_resize_y=True, border=True, no_scrollbar=True)
                 dpg.bind_item_theme(bubble, "bubble_user" if user else "bubble_agent")
-                dpg.add_text(text.strip(), parent=bubble, wrap=0)
+                # A plain add_text cannot be selected (ImGui labels have no selection). A read-only
+                # input looks the same but supports mouse selection, Ctrl+A and Ctrl+C. ImGui
+                # inputs do not wrap, so the text is wrapped here and again when the width changes.
+                box = dpg.add_input_text(parent=bubble, multiline=True, readonly=True, width=-1,
+                                         default_value=text.strip(), tab_input=False)
+                dpg.bind_item_theme(box, "text_select")
+                self._chat_boxes.append((box, text.strip()))
+                self._wrap_box(box, text.strip(), self._chat_text_width())
         dpg.add_spacer(height=6, parent="chat_view")
         self._scroll_chat = 3
+
+    # ---- selectable chat text
+    def _copy_message(self, sender, app_data, text) -> None:
+        dpg.set_clipboard_text(text)
+        dpg.configure_item(sender, label="Copied")
+        self._copy_reset.append((sender, 90))     # frames until the label goes back
+
+    def _chat_text_width(self) -> int:
+        """Pixels available for text in a bubble: chat area minus avatar, gap, bubble margin, padding."""
+        w = dpg.get_item_rect_size("chat_view")[0] if dpg.does_item_exist("chat_view") else 0
+        return max(200, (w or 1000) - 36 - 12 - 48 - 28 - 24)
+
+    def _text_w(self, s: str) -> float:
+        cached = self._tw_cache.get(s)
+        if cached is None:
+            size = None
+            try:
+                size = dpg.get_text_size(s, font=st.FONTS.get("body", 0))
+            except Exception:
+                pass
+            cached = size[0] if size and size[0] else len(s) * 9.5 * st.UI_SCALE
+            if len(self._tw_cache) < 20000:
+                self._tw_cache[s] = cached
+        return cached
+
+    def _wrap(self, text: str, width: int) -> list[str]:
+        space = self._text_w(" ")
+        out: list[str] = []
+        for para in text.split("\n"):
+            line, lw = "", 0.0
+            for word in para.split(" "):
+                ww = self._text_w(word)
+                if ww > width:                      # long URL / token: hard-break by characters
+                    if line:
+                        out.append(line)
+                        line, lw = "", 0.0
+                    chunk = ""
+                    for ch in word:
+                        if self._text_w(chunk + ch) > width and chunk:
+                            out.append(chunk)
+                            chunk = ""
+                        chunk += ch
+                    line, lw = chunk, self._text_w(chunk)
+                    continue
+                add = ww + (space if line else 0)
+                if line and lw + add > width:
+                    out.append(line)
+                    line, lw = word, ww
+                else:
+                    line, lw = (f"{line} {word}" if line else word), lw + add
+            out.append(line)
+        return out
+
+    def _wrap_box(self, box: int, text: str, width: int) -> None:
+        lines = self._wrap(text, width)
+        if not self._line_h:
+            try:
+                size = dpg.get_text_size("Ag", font=st.FONTS.get("body", 0))
+                self._line_h = size[1] if size and size[1] else 0
+            except Exception:
+                pass
+        line_h = self._line_h or round(19 * st.UI_SCALE)
+        dpg.set_value(box, "\n".join(lines))
+        dpg.configure_item(box, height=int(len(lines) * line_h + 6))
+
+    def _rewrap_chat(self) -> None:
+        """Window / panel resized: wrap the chat again to the new width (only on a real change)."""
+        if not dpg.is_item_shown("chat_view"):
+            return
+        w = self._chat_text_width()
+        if abs(w - self._chat_wrap_w) < 8:
+            return
+        self._chat_wrap_w = w
+        self._chat_boxes = [(b, t) for b, t in self._chat_boxes if dpg.does_item_exist(b)]
+        for box, text in self._chat_boxes:
+            self._wrap_box(box, text, w)
 
     def _load_json(self, key: str, force: bool = False) -> None:
         if self.json_dirty[key] and not force:
@@ -539,7 +643,7 @@ class EcogentApp:
             if folder.exists():
                 rows += [(kind, p) for p in sorted(folder.rglob("*")) if p.is_file() and not p.name.endswith(".tmp")]
         if not rows:
-            st.font(dpg.add_text("No files yet.", parent="files_list", color=st.FAINT), "small")
+            st.font(dpg.add_text("No files yet.", parent="files_list", color=st.SUBTLE), "small")
             return
         with dpg.table(parent="files_list", header_row=True, row_background=True, borders_innerH=True,
                        policy=dpg.mvTable_SizingStretchProp, scrollY=True, height=-1):
@@ -558,14 +662,41 @@ class EcogentApp:
                     dpg.bind_item_theme(b, "btn_secondary")
 
     # ------------------------------------------------------------------ actions
+    def _submit_profile_setup(self, name: str, url: str, lang: Optional[str] = None) -> None:
+        """Open the profile's browser on the worker; when the user closes it, a 'profile_done'
+        event tells the GUI (log + the New task dialog's message) that the session was saved."""
+        self.log(f"Opening browser for profile '{name}'. Log in, then close the browser window.")
+
+        def job() -> None:
+            try:
+                self.worker.agent.browser.setup_profile(name, url, lang)
+            except Exception as e:
+                self.ui.emit("profile_done", profile=name, error=str(e))
+                raise
+            self.ui.emit("profile_done", profile=name, error="")
+        self.worker.submit("Profile setup", job)
+
     def new_task(self, prompt: str = "", task_type: str = "") -> None:
-        dialogs.NewTaskDialog(self.settings, self._profiles(), prompt, self._create_task, task_type=task_type)
+        self._new_task_dialog = dialogs.NewTaskDialog(
+            self.settings, self._profiles(), prompt, self._create_task, task_type=task_type,
+            on_open_browser=self._submit_profile_setup)
+
+    def _setup_new_profile(self, r: dict) -> None:
+        """New profile chosen in the New task dialog: open the browser at the destination URL first.
+        The worker queue is sequential, so the task's first run starts after the window is closed."""
+        if not r.get("new_profile_url"):
+            return
+        url = "" if r["new_profile_url"] == "about:blank" else r["new_profile_url"]
+        self._submit_profile_setup(r["profile"], url, r.get("browser_lang"))
 
     def _create_task(self, r: dict) -> None:
+        self._setup_new_profile(r)
         if r["task_type"] == "auto":
             self.worker.submit("Detect task type", self._auto_create, r)
             return
         s = self.worker.agent.new_chat(r["task_type"], r["title"], r["profile"], r["headless"])
+        s.update_meta(browser_lang=r.get("browser_lang", self.settings.browser_language),
+                      page_wait=r.get("page_wait"), bot_wait=r.get("bot_wait"))
         self.current = s.id
         self.refresh_chats()
         self.load_chat(s.id)
@@ -583,7 +714,9 @@ class EcogentApp:
         if not choice:
             return
         s = agent.new_chat(TASK_TYPES[labels.index(choice)], r["title"], r["profile"], r["headless"])
-        s.update_meta(intent=guess.get("intent", ""))
+        s.update_meta(intent=guess.get("intent", ""),
+                      browser_lang=r.get("browser_lang", self.settings.browser_language),
+                      page_wait=r.get("page_wait"), bot_wait=r.get("bot_wait"))
         self.ui.emit("select", s.id, prompt=r["prompt"])
         agent.handle_message(s.id, r["prompt"])
 
@@ -624,6 +757,7 @@ class EcogentApp:
             self.scheduler.remove(cid)
             self.current = None
             dpg.delete_item("chat_view", children_only=True)
+            self._chat_boxes = []
             self._show_task_view(False)
             self._update_usage()
             self.worker.submit("Delete task", self.worker.agent.delete_chat, cid)
@@ -657,10 +791,7 @@ class EcogentApp:
         dialogs.pick_path(chosen, folder=True)
 
     def open_profiles(self) -> None:
-        def setup(name: str, url: str) -> None:
-            self.log(f"Opening browser for profile '{name}'. Log in, then close the browser window.")
-            self.worker.submit("Profile setup", self.worker.agent.browser.setup_profile, name, url)
-        dialogs.ProfilesDialog(self.settings.profile_path, setup)
+        dialogs.ProfilesDialog(self.settings.profile_path, lambda name, url: self._submit_profile_setup(name, url))
 
     def open_schedules(self) -> None:
         s = self.session()
@@ -733,6 +864,13 @@ class EcogentApp:
                 for key, *_ in JSON_TABS:
                     self._load_json(key)
                 self._update_usage()
+        elif k == "profile_done":
+            name, error = p.get("profile", ""), p.get("error", "")
+            if not error:
+                self.log(f"Browser closed - session saved in profile '{name}'.")
+            dlg = getattr(self, "_new_task_dialog", None)
+            if dlg is not None:
+                dlg.profile_done(name, error)
         elif k == "error":
             self.set_status("Error - see activity log", "err")
         elif k == "request":
