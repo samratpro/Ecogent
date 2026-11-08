@@ -239,6 +239,7 @@ class Executor:
         # Every run must produce its own output file; an old one would hide a run that wrote none.
         self.data().pop("output_file", None)
         run_entry = {"started": now_iso(), "status": "running"}
+        self._is_rerun = bool(self.plan.get("runs"))     # an earlier run compiled this plan
         self.plan.setdefault("runs", []).append(run_entry)
         try:
             for step in steps:
@@ -331,7 +332,8 @@ class Executor:
                         continue
                     raise StopRequested("aborted by user")
 
-                can_heal = (heals < self.settings.max_heal_attempts and not isinstance(e, NoHeal))
+                can_heal = (heals < self.settings.max_heal_attempts and not isinstance(e, NoHeal)
+                            and not self.repair_off())
                 if can_heal and self.run_heals >= self.settings.max_heals_per_run:
                     if self.run_heals == self.settings.max_heals_per_run:
                         self.log(f"Heal limit of {self.settings.max_heals_per_run} per run reached; "
@@ -374,7 +376,7 @@ class Executor:
                         raise StopRequested("aborted by user")
 
                 # Heal could not fix it: a few guided moves on the live page (bounded ReAct).
-                if rescues < 1 and self._can_rescue(current, e):
+                if rescues < 1 and not self.repair_off() and self._can_rescue(current, e):
                     rescues += 1
                     res = self._rescue(current, key, prefix, err)
                     if res == "ok":
@@ -732,13 +734,26 @@ class Executor:
             score += 2.0
         return score
 
+    def _ablated(self, name: str) -> bool:
+        """Benchmark ablation switch (Settings.ablate); always False in normal use."""
+        return name in (getattr(self.settings, "ablate", None) or ())
+
+    def repair_off(self) -> bool:
+        """Compile-only baseline: the first run compiles the plan normally, reruns never repair."""
+        return self._ablated("no_repair") and getattr(self, "_is_rerun", False)
+
     def _try_cached(self, mem: dict, key: str) -> Optional[str]:
         """Cached selector, then stored alternates; each verified against the element identity."""
-        tried = [mem.get("selector")] + list(mem.get("alternates") or [])
+        tried = [mem.get("selector")]
+        if not self._ablated("no_alternates"):
+            tried += list(mem.get("alternates") or [])
         for n, sel in enumerate(s for s in tried if s):
             if not self.browser.exists(sel):
                 continue
-            ok, live_text = self._identity(mem, self.browser.describe(sel))
+            if self._ablated("no_identity"):
+                ok, live_text = True, False     # blind replay (what plain selector caches do)
+            else:
+                ok, live_text = self._identity(mem, self.browser.describe(sel))
             if not ok:
                 continue
             if live_text:
@@ -801,8 +816,10 @@ class Executor:
         if pr.detect_blocker(html):
             html = self.browser.html()      # the check passed: read the real page
 
+        if had_memory and self._ablated("no_repair"):
+            raise NoHeal(f"cached element is gone and repair is off (compile-only baseline): {target}")
         if had_memory:
-            sel = self._local_refind(mem, html, action, target)
+            sel = None if self._ablated("no_refind") else self._local_refind(mem, html, action, target)
             if sel:
                 self.log(f"{key}: element changed on the page; re-found it locally (no LLM)")
                 self.stats.local_heals += 1
@@ -821,7 +838,14 @@ class Executor:
             cands = self._visible(pr.candidates(html, action, target, level, limit=want * 2), want)
             if not cands:
                 continue
-            if level == 1:
+            if self._ablated("no_graded") and not step.get("optional"):
+                if level == 1 and not self._ablated("no_obvious"):
+                    pick = pr.obvious_choice(cands, action)
+                    if pick and self.browser.exists(pick["selector"]):
+                        self.stats.local_picks += 1
+                        return self._remember(mem, pick["selector"])
+                break                       # straight to the full outline below
+            if level == 1 and not self._ablated("no_obvious"):
                 pick = pr.obvious_choice(cands, action)
                 if pick and self.browser.exists(pick["selector"]):
                     self.stats.local_picks += 1
@@ -848,7 +872,8 @@ class Executor:
         # Outline: first only the parts that mention the target (about a quarter of the tokens),
         # then the full outline if that did not give a working selector.
         outline = pr.page_outline(html, self.settings.max_page_chars)
-        focused = pr.focus_outline(outline, target, max_chars=min(3000, self.settings.max_page_chars // 3))
+        focused = "" if self._ablated("no_graded") else \
+            pr.focus_outline(outline, target, max_chars=min(3000, self.settings.max_page_chars // 3))
         for view, label in ((focused, "focused"), (outline, "full")):
             if not view:
                 continue

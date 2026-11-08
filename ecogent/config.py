@@ -32,6 +32,17 @@ LLM_PURPOSES = ["plan", "followup", "pick", "locate", "heal", "rescue", "pattern
                 "analyze", "classify", "repair"]
 CHEAP_PURPOSES_DEFAULT = ["pick", "validate", "analyze_map", "classify", "repair"]
 
+# Benchmark ablations (Settings.ablate): switch off one rung of the element lookup / repair ladder
+# to measure what it contributes. Never set in normal use.
+ABLATIONS = {
+    "no_identity": "replay a cached selector without checking it is still the same element",
+    "no_alternates": "do not try the stored alternate locators",
+    "no_refind": "no local similarity re-find of a remembered element",
+    "no_obvious": "no local pick of the single obvious candidate (always ask the LLM)",
+    "no_graded": "skip the small LLM views (15/60 candidates, focused outline): full outline only",
+    "no_repair": "compile-only baseline: on reruns a broken step is not repaired (no re-find, LLM, heal or rescue)",
+}
+
 
 # Provider presets. All except "anthropic" speak the OpenAI-compatible /chat/completions API.
 PROVIDERS = {
@@ -104,6 +115,8 @@ class Settings:
     analysis_direct_chars: int = 30000
     analysis_budget_chars: int = 24000   # relevance filter: max chars of page text sent to analysis (0 = off)
     use_vector_memory: bool = True
+    # Benchmark ablations only (bench/drift_bench.py); empty in normal use. See ABLATIONS.
+    ablate: list = field(default_factory=list)
 
     # ------------------------------------------------------------------ paths
     @property

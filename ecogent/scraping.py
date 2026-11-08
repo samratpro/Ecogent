@@ -114,6 +114,9 @@ class ScrapeEngine:
                 ex.stats.cache_hits += 1
                 self.log(f"Reusing confirmed scraping pattern ({len(rows)} records on this page)")
                 need_build = False
+            elif ex.repair_off():
+                from .executor import NoHeal
+                raise NoHeal("stored scraping pattern no longer matches and repair is off (compile-only baseline)")
             else:
                 self.log("Stored pattern failed validation; healing it")
 

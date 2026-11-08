@@ -1,0 +1,18 @@
+# /etc/systemd/system/ecogent-lab.service
+[Unit]
+Description=Ecogent public benchmark lab
+After=network.target
+
+[Service]
+User=ecolab
+WorkingDirectory=/opt/ecogent
+ExecStart=/opt/ecogent/.venv/bin/python -m bench.lab.public --host 127.0.0.1 --port 8790 --public-base https://lab.example.com
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
