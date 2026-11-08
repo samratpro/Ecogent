@@ -10,6 +10,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "@browserbasehq/stagehand": "3.7.3"
+    "@browserbasehq/stagehand": "3.7.3",
+    "zod": "4.6.6"
   }
 }

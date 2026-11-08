@@ -300,7 +300,7 @@ def external_output(task, res: dict, run_dir: Path) -> Path | None:
     if files:
         return files[0]
     text = (res.get("final_text") or "").strip()
-    if not text or task.type not in want:
+    if not text or not want:
         return None
     if task.type == "analysis":
         out = run_dir / "final_answer.md"
