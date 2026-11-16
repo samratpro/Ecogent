@@ -19,7 +19,8 @@ System variants (--variants, comma separated):
   no_cheap       the full system with the cheap model off (main model for every job)
   <ablation>     one or more of ecogent.config.ABLATIONS joined by "+", e.g. no_refind+no_obvious
   browser_use    external baseline: browser-use (LLM decides every step; no memory -> every run fresh).
-                 Needs .venv-baselines (pip install browser-use).
+                 Needs .venv-baselines (pip install browser-use). Vision on, as shipped.
+  browser_use_novision  the same with use_vision=False (text-only, like Ecogent's page view)
   stagehand      external baseline: Stagehand v3 agent with cacheDir + selfHeal (records on the cold
                  run, replays / self-heals on reruns; same restore protocol as Ecogent).
                  Needs node + bench/baselines/stagehand (npm install).
@@ -66,7 +67,7 @@ FIELDS = ["task", "type", "variant", "seed", "repeat", "level", "level_name", "p
           "rescued", "steps_ok", "steps_failed", "steps_skipped", "main_model", "cheap_model", "chat_id", "time"]
 SPECIAL = {"ecogent", "nocache", "compile_only", "no_cheap"}
 LEVEL_NAMES = dict(drift.LEVELS)          # --site shop replaces these with bench.shop_tasks.LEVELS
-EXTERNAL = {"browser_use", "stagehand"}
+EXTERNAL = {"browser_use", "browser_use_novision", "stagehand"}
 BASELINES = ROOT / "bench" / "baselines"
 
 
@@ -324,7 +325,7 @@ def run_external_cell(task, variant: str, seed: int, rep: int, levels: list[int]
     model = f"{llm.provider}:{llm.model}"
     browser = find_browser(base)
     cache, snap = home / "stagehand_cache", home / "stagehand_cache_after_cold"
-    if variant == "browser_use":
+    if variant.startswith("browser_use"):
         exe = ROOT / ".venv-baselines" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
         cmd_base = [str(exe), str(BASELINES / "run_browser_use.py")]
     else:
@@ -339,17 +340,21 @@ def run_external_cell(task, variant: str, seed: int, rep: int, levels: list[int]
         cfg = {"prompt": external_prompt(task, srv.base), "out_dir": str(run_dir), "cache_dir": str(cache),
                "llm": {"provider": llm.provider, "model": llm.model, "base_url": llm.base_url},
                "browser": {"executable": browser, "headless": args.headless},
-               "max_steps": args.max_steps, "timeout_s": args.timeout}
+               "max_steps": args.max_steps, "timeout_s": args.timeout,
+               "use_vision": variant != "browser_use_novision"}
         run_dir.mkdir(parents=True, exist_ok=True)
         cfg_path = run_dir / "config.json"
         cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
         env = {**__import__("os").environ, "BENCH_LLM_KEY": llm.api_key}
         t0 = time.time()
-        try:
-            subprocess.run([*cmd_base, str(cfg_path)], env=env, timeout=args.timeout + 120,
-                           capture_output=not args.verbose, cwd=str(ROOT))
-        except subprocess.TimeoutExpired:
-            pass
+        # The agent's own output is always kept (run_dir/agent.log): a failure must be explainable later.
+        with open(run_dir / "agent.log", "w", encoding="utf-8", errors="replace") as log_fh:
+            try:
+                subprocess.run([*cmd_base, str(cfg_path)], env={**env, "PYTHONIOENCODING": "utf-8"},
+                               timeout=args.timeout + 120, cwd=str(ROOT),
+                               stdout=None if args.verbose else log_fh, stderr=subprocess.STDOUT if not args.verbose else None)
+            except subprocess.TimeoutExpired:
+                log_fh.write(f"\n[drift_bench] runner killed after {args.timeout + 120} s\n")
         res_path = run_dir / "result.json"
         res = json.loads(res_path.read_text(encoding="utf-8")) if res_path.exists() else \
             {"status": "failed", "error": "runner wrote no result"}
@@ -381,6 +386,12 @@ def run_external_cell(task, variant: str, seed: int, rep: int, levels: list[int]
     measure(0, "cold")
     if variant == "stagehand" and cache.exists():
         shutil.copytree(cache, snap, dirs_exist_ok=True)
+    if variant == "stagehand" and not (snap.exists() and any(snap.glob("*.json"))):
+        # Stagehand caches only runs its agent reports as successful: reruns restored from this snapshot
+        # start without a cache. Recorded in work/.../cache_note.txt so the paper can state it.
+        note = "cold run left no Stagehand cache (its agent did not report success); restored reruns start without a cache"
+        print(f"  ! {task.name} stagehand s{seed}r{rep}: {note}", file=sys.stderr)
+        (home / "cache_note.txt").write_text(note + "\n", encoding="utf-8")
     for level in levels:
         if variant == "stagehand":                  # same protocol as Ecogent: restore what the cold run cached
             shutil.rmtree(cache, ignore_errors=True)
@@ -457,7 +468,8 @@ def main() -> None:
     manifest = {"started": datetime.now(timezone.utc).isoformat(timespec="seconds"), "git_commit": git_commit(),
                 "args": vars(args), "main_model": f"{base.main_llm.provider}:{base.main_llm.model}",
                 "cheap_model": (f"{base.cheap_llm.provider}:{base.cheap_llm.model}" if base.cheap_llm.enabled else ""),
-                "cheap_purposes": base.cheap_purposes, "tasks": [t.name for t in tasks], "site": args.site, "levels": LEVEL_NAMES}
+                "cheap_purposes": base.cheap_purposes, "tasks": [t.name for t in tasks], "site": args.site, "levels": LEVEL_NAMES,
+                "lab_level1_css_fix": drift.LEVEL1_CSS_FIX}
     if args.meta:
         manifest["meta"] = json.loads(Path(args.meta).read_text(encoding="utf-8"))
     out.with_suffix(".manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")

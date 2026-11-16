@@ -17,12 +17,19 @@ keeps its action, method and field names - so each task stays solvable at every 
 from __future__ import annotations
 
 import hashlib
+import os
 import random
 import re
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 
 LEVELS = {0: "none", 1: "attributes", 2: "structure", 3: "text", 4: "redesign"}
+
+# Level 1 renames classes / ids in the HTML. Until 2026-11-16 the <style> block kept the old names, so the
+# page lost its styling (a look change on top of the code change - unfair to agents that read screenshots).
+# Now the CSS is renamed too. Set ECOGENT_LAB_LEGACY_L1=1 only to reproduce runs made before the fix
+# (the manifest records which behaviour a run used).
+LEVEL1_CSS_FIX = os.environ.get("ECOGENT_LAB_LEGACY_L1", "") != "1"
 
 # Interface wording only (exact match, case-insensitive). Data text is never in this table.
 UI_TEXT = {
@@ -80,6 +87,18 @@ def _attributes(soup: BeautifulSoup, seed: int) -> None:
     for a in soup.find_all("a", href=True):
         if a["href"].startswith("#") and a["href"][1:] in ids:
             a["href"] = "#" + ids[a["href"][1:]]
+    if LEVEL1_CSS_FIX:
+        for style in soup.find_all("style"):
+            style.string = _rename_css(style.get_text(), seed, ids)
+
+
+def _rename_css(css: str, seed: int, ids: dict) -> str:
+    """Apply the level-1 renames to the selectors of a <style> block (never to property values such as
+    #fff or 0.5em), so the page keeps its look: only the code changes, as on a real site rebuild."""
+    def selector(sel: str) -> str:
+        sel = re.sub(r"\.([A-Za-z_][\w-]*)", lambda m: f".c{_h(seed, m.group(1))}", sel)
+        return re.sub(r"#([A-Za-z_][\w-]*)", lambda m: f"#{ids.get(m.group(1), m.group(1))}", sel)
+    return re.sub(r"([^{}]+)\{", lambda m: (m.group(0) if m.group(1).strip().startswith("@") else selector(m.group(1)) + "{"), css)
 
 
 # ----------------------------------------------------------------------------- level 2

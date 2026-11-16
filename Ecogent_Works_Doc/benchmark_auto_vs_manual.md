@@ -10,10 +10,10 @@
 
 | Part | Automatic (app / scripts) | Manual (you) |
 |---|---|---|
-| Free checks (lab self-test, fake-LLM run) | ✅ one click in **Benchmark → Run setup** | — |
-| Test shop (port 3010): start / stop, scenarios, look + flow checks | ✅ sidebar → **Test Lab** | pick scenarios for manual tests; freeze the shop (git tag) before the first agent run |
-| Shop benchmark: 9 held-out tasks, 10 change types, oracles on live ground truth | ✅ `drift_bench --site shop`, or Run setup → Site: shop | never tune Ecogent on these tasks |
-| **Paper run**: checklist reviewers check, recorded with the results, paper report | ✅ **Benchmark → Paper run** | commit + tag, temperature 0, price date, write and commit `bench/preregistration.md` |
+| Free checks (lab self-test, pipeline test (mock LLM)) | ✅ one click in **Benchmark → Configuration** | — |
+| Test shop (port 3010): start / stop, scenarios, visual invariance and task-completion tests | ✅ sidebar → **Test Lab** | pick scenarios for manual tests; freeze the shop (git tag) before the first agent run |
+| Shop benchmark: 9 held-out tasks, 10 change types, oracles on live ground truth | ✅ `drift_bench --site shop`, or Configuration → Site: shop | never tune Ecogent on these tasks |
+| **Experiment**: checklist reviewers check, recorded with the results, paper report | ✅ **Benchmark → Experiment** | commit + tag, temperature 0, price date, write and commit `bench/preregistration.md` |
 | Settings: models, API keys, temperature 0, prices with date | — | ✅ |
 | Commit code before a session | — | ✅ |
 | Lab benchmark runs: Ecogent, `nocache`, `compile_only`, `no_cheap`, ablations | ✅ Run now or on a schedule | watch the first runs |
@@ -51,15 +51,15 @@ For every task × system × seed (one "cell"):
 | Tab | What it does |
 |---|---|
 | **Results** | Tick one or more CSVs from `bench/results/`. Shows a **By system** table (passed, LLM calls, total cost, cold run, mean rerun, ×Ecogent, seconds, rerun2 at 0 calls, timeouts), a **By drift level** table (passed / cost / calls per level) and the individual runs. **Markdown summary** runs `bench/summarize.py` (mean ± sd, 95% CI, paired tests, cost of ownership); **Figures** runs `bench/plot.py` (SVG). |
-| **Run setup** | Tasks (24 lab tasks), systems, drift levels, seeds, repeats, prices, result name, step limit / timeout for external agents, headless, skip rerun2. Shows the number of cells and runs and the exact command. **Run now**, **Stop**, **Save settings**, and the two free checks. |
-| **Output** | Live output of the running benchmark or check. |
+| **Configuration** | Tasks (24 lab tasks), systems, drift levels, seeds, repeats, prices, result name, step limit / timeout for external agents, headless, skip rerun2. Shows the number of cells and runs and the exact command. **Run now**, **Stop**, **Save settings**, and the two free checks. |
+| **Log** | Live output of the running benchmark or check. |
 | **Schedule** | When the automatic benchmark runs (see 2.3). |
 
 A run that times out without reporting usage is shown as unknown cost (`-`), not $0.
 
-### 2.2b Paper run (Benchmark → Paper run)
+### 2.2b Experiment tab (Benchmark → Experiment)
 Pick an experiment (main comparison on the lab, main comparison on the test shop, ablations, or a pilot). The
-checklist must be green before **Start paper run** is enabled:
+checklist must be green before **Run experiment** is enabled:
 
 | Check | Why reviewers care |
 |---|---|
@@ -70,17 +70,17 @@ checklist must be green before **Start paper run** is enabled:
 | Required baselines (ecogent, nocache, compile_only, no_cheap if a cheap model is used, an external agent) | No strawman comparison; savings attributed to reuse and repair, not to the cheap model |
 | External agents installed | Their runs must not fail for setup reasons |
 | `bench/preregistration.md` committed | Hypotheses written before the results, including unfavourable ones |
-| Free checks passed at this commit (lab self-test, fake run; for the shop also task self-test, look, flow) | The measuring tools work on exactly this code |
+| Validation tests passed at this commit (lab integrity, pipeline; for the shop also oracle, visual invariance, task completion) | The measuring tools work on exactly this code |
 | New result file | Rows from different code versions never mix |
 
-**Start anyway** is possible, but the run is then marked NOT paper-ready, and every failed check is listed as a
+**Run with deviations** is possible, but the run is then marked as having protocol deviations, and every failed check is listed as a
 deviation in the report. The checklist, environment (OS, Python, Node, settings without API keys) and price date
-go into `<name>.meta.json` and the manifest. **Make paper report** writes `<name>_paper_report.md`: protocol,
+go into `<name>.meta.json` and the manifest. **Generate report** writes `<name>_paper_report.md`: protocol,
 deviations, statistics tables and figures.
 
 ### 2.3 Schedule: when the automatic test runs
 - Modes: **off** (only when you press Run now), **once** (date + time), **daily** (time), **weekly** (day + time).
-- It uses the tasks and systems **saved** in Run setup (press **Save settings** after changing them).
+- It uses the tasks and systems **saved** in Configuration (press **Save settings** after changing them).
 - The **app must be open**. If it was closed at the due time, the run starts the next time you open the app.
 - **Wait while Ecogent is busy** (on by default): a due run waits until the current Ecogent task has finished.
 - A due run that cannot start (e.g. no API key) is skipped and logged. A once-only schedule then ends.
@@ -101,7 +101,7 @@ deviations, statistics tables and figures.
 ### 3.1 Before every paid session
 1. Settings: main (+ cheap) model, **temperature 0**, and today's prices noted in `NOTES.md` with the date.
 2. `git commit`: the manifest records the commit, so results match a known code version.
-3. Run the free checks (Benchmark → Run setup): `LAB OK` and `FAKE RUN OK`.
+3. Run the free checks (Benchmark → Configuration): `LAB OK` and `FAKE RUN OK`.
 4. Don't run Ecogent tasks in the app during a benchmark: they slow the machine down, which changes the timing numbers.
 
 ### 3.2 During and after runs
@@ -114,7 +114,10 @@ deviations, statistics tables and figures.
 - Back up `bench/results/` (git-ignored).
 
 ### 3.3 Manual agents (success and time only, never tokens / dollars)
-Claude in Chrome, Perplexity Comet, Antigravity: `python -m bench.lab.serve --system <name-version> --level 0 --seed 1`.
+Claude in Chrome, Perplexity Comet, Antigravity: `python -m bench.lab.serve --system <name-version> --level 0 --seed 1`
+(lab) or `python -m bench.lab.serve --site shop --system <name-version> --level 0` (test shop, levels 0-9).
+`start <task>` prints the prompt; when the agent answers in its chat window, type `paste`, paste the answer and
+end with a line `END`. Each score also records how many times you stepped in ("helps").
 Same tasks, same drift levels, the oracle scores the result. Rules: paste the prompt exactly, one attempt,
 fresh chat, don't help (write down any answer you give). At least levels 0 and 3. Details: `benchmark_manual_testing.md` §5.
 

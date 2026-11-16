@@ -35,24 +35,24 @@ MAIN_VARIANTS = ["ecogent", "nocache", "compile_only", "no_cheap", "stagehand", 
 ABLATION_VARIANTS = ["ecogent", "no_identity", "no_alternates", "no_refind", "no_obvious", "no_graded", "no_cheap"]
 
 PRESETS = {
-    "main_lab": {"title": "Main comparison - lab sites", "paper": True, "site": "lab", "tasks": "all",
+    "main_lab": {"title": "Main comparison: lab sites", "paper": True, "site": "lab", "tasks": "all",
                  "variants": MAIN_VARIANTS, "levels": "0,1,2,3,4", "seeds": "1,2,3,4,5",
                  "about": "24 lab tasks x drift levels 0-4 (cumulative) x 5 seeds, Ecogent vs every baseline."},
-    "main_shop": {"title": "Main comparison - test shop (held-out)", "paper": True, "site": "shop", "tasks": "all",
+    "main_shop": {"title": "Main comparison: test shop (held-out)", "paper": True, "site": "shop", "tasks": "all",
                   "variants": MAIN_VARIANTS, "levels": "0,1,2,3,4,5,6,7,8,9", "seeds": "1,2,3,4,5",
                   "about": "9 held-out shop tasks x 10 real-world change types x 5 seeds. Ecogent was never tuned on these."},
-    "ablations": {"title": "Ablations - which part saves what", "paper": True, "site": "lab", "tasks": "all",
+    "ablations": {"title": "Ablation study", "paper": True, "site": "lab", "tasks": "all",
                   "variants": ABLATION_VARIANTS, "levels": "0,1,2,3,4", "seeds": "1,2,3,4,5",
-                  "about": "Ecogent with one part of the element-lookup ladder switched off at a time."},
-    "pilot": {"title": "Pilot (not for the paper)", "paper": False, "site": "lab",
+                  "about": "Ecogent with one component of the element-lookup ladder disabled at a time."},
+    "pilot": {"title": "Pilot study (exploratory)", "paper": False, "site": "lab",
               "tasks": ["shop_baby_under_30", "papers_caching", "jobs_python", "crm_add_deal"],
               "variants": ["ecogent", "nocache", "compile_only", "stagehand", "browser_use"], "levels": "0,1,2,3,4", "seeds": "1,2",
-              "about": "4 tasks x 2 seeds: check time, cost and that every system runs before the paid full run."},
+              "about": "4 tasks x 2 seeds: estimates run time and cost and verifies that every system runs."},
 }
 
 # Free checks a paper run needs, per site (label -> how its success is recognised in the output)
-CHECKS_FOR_SITE = {"lab": ["Lab self-test", "Fake-LLM benchmark run"],
-                   "shop": ["Lab self-test", "Fake-LLM benchmark run", "Shop task self-test", "Shop look check", "Shop flow check"]}
+CHECKS_FOR_SITE = {"lab": ["Lab integrity test", "Lab visual invariance test", "Pipeline test (mock LLM)"],
+                   "shop": ["Lab integrity test", "Pipeline test (mock LLM)", "Shop oracle test", "Shop visual invariance test", "Shop task-completion test"]}
 
 
 @dataclass
@@ -119,57 +119,57 @@ def _price_models(prices: str) -> set[str]:
 def readiness(settings: Settings, cfg: dict, paper: bool = True) -> list[Check]:
     out: list[Check] = []
     dirty = dirty_files()
-    out.append(Check("Code committed", not dirty,
+    out.append(Check("Clean working tree", not dirty,
                      "clean" if not dirty else f"{len(dirty)} uncommitted file(s): {', '.join(dirty[:4])}{' ...' if len(dirty) > 4 else ''}",
-                     "Commit your changes (git commit). Results must belong to a known code version."))
+                     "Commit all changes. Results must map to a recorded code version."))
     t = tag()
-    out.append(Check("Code frozen (git tag)", bool(t), f"tag {t}" if t else f"commit {commit()[:10]} has no tag",
-                     "Tag the commit, e.g.  git tag paper-v1  - and do not change prompts after seeing results."))
+    out.append(Check("Tagged release", bool(t), f"tag {t}" if t else f"commit {commit()[:10]} has no tag",
+                     "Tag the commit (e.g. git tag v1.0). Do not change prompts after observing results."))
     llms = [("main", settings.main_llm)] + ([("cheap", settings.cheap_llm)] if settings.cheap_llm.enabled else [])
     temps = {n: c.temperature for n, c in llms}
-    out.append(Check("Temperature 0", all(v == 0 for v in temps.values()),
+    out.append(Check("Deterministic decoding (temperature 0)", all(v == 0 for v in temps.values()),
                      ", ".join(f"{n} {v:g}" for n, v in temps.items()),
-                     "Settings > Main LLM (and Cheap model): set Temperature to 0."))
+                     "Settings > Main LLM and Cheap model: set Temperature to 0."))
     have = _price_models(cfg.get("prices", ""))
     need = {c.model for _, c in llms}
     missing = sorted(m for m in need if m not in have)
-    out.append(Check("Prices for every model", not missing, "all priced" if not missing else f"missing: {', '.join(missing)}",
-                     "Run setup > Prices: MODEL=IN,OUT,CACHED (USD per 1M tokens) for each model."))
+    out.append(Check("Pricing for all models", not missing, "complete" if not missing else f"missing: {', '.join(missing)}",
+                     "Configuration > Pricing: MODEL=IN,OUT,CACHED (USD per 1M tokens) for each model."))
     pd = str(cfg.get("price_date", ""))
     pd_ok = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", pd))
-    out.append(Check("Price date", pd_ok, pd or "not set",
-                     "Enter the date you read the prices on the providers' pricing pages (YYYY-MM-DD)."))
+    out.append(Check("Pricing date", pd_ok, pd or "not set",
+                     "Enter the date the prices were taken from the provider pricing pages (YYYY-MM-DD)."))
     try:
         n_seeds = len([s for s in str(cfg.get("seeds", "")).split(",") if s.strip()])
     except ValueError:
         n_seeds = 0
-    out.append(Check(f"At least {MIN_SEEDS} seeds", n_seeds >= MIN_SEEDS, f"{n_seeds} seed(s)",
-                     f"Use {MIN_SEEDS} or more seeds (e.g. 1,2,3,4,5) so the paper can report mean ± spread and tests."))
+    out.append(Check(f"Sample size (>= {MIN_SEEDS} seeds)", n_seeds >= MIN_SEEDS, f"{n_seeds} seed(s)",
+                     f"Use {MIN_SEEDS} or more seeds (e.g. 1,2,3,4,5) to report means, confidence intervals and tests."))
     variants = set(cfg.get("variants") or [])
     is_ablation = any(v in variants for v in ("no_identity", "no_alternates", "no_refind", "no_obvious", "no_graded"))
     want = {"ecogent"} if is_ablation else {"ecogent", "nocache", "compile_only"}
     if settings.cheap_llm.enabled:
         want.add("no_cheap")
     lacking = sorted(want - variants)
-    ext_ok = is_ablation or bool(variants & {"stagehand", "browser_use"})
-    out.append(Check("Required baselines", not lacking and ext_ok,
-                     ("all present" if not lacking else f"missing: {', '.join(lacking)}") +
+    ext_ok = is_ablation or bool(variants & {"stagehand", "browser_use", "browser_use_novision"})
+    out.append(Check("Baseline coverage", not lacking and ext_ok,
+                     ("complete" if not lacking else f"missing: {', '.join(lacking)}") +
                      ("" if ext_ok else "; no external agent (stagehand / browser_use)"),
                      "Main comparison: ecogent, nocache (no reuse), compile_only (no repair), no_cheap (if a cheap model "
                      "is used) and at least one external agent."))
     inst = []
-    if "browser_use" in variants and not (REPO / ".venv-baselines" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")).exists():
+    if variants & {"browser_use", "browser_use_novision"} and not (REPO / ".venv-baselines" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")).exists():
         inst.append("browser-use (.venv-baselines)")
     if "stagehand" in variants and not (REPO / "bench" / "baselines" / "stagehand" / "node_modules").exists():
         inst.append("Stagehand (npm install in bench/baselines/stagehand)")
-    out.append(Check("External agents installed", not inst, "ok" if not inst else "missing: " + ", ".join(inst),
+    out.append(Check("Baseline installation", not inst, "ok" if not inst else "missing: " + ", ".join(inst),
                      "Install the missing baseline (see bench/baselines)."))
     prereg_dirty = any(f.endswith("preregistration.md") for f in _git("status", "--porcelain", "--", "bench").splitlines())
     prereg_ok = PREREG.exists() and not prereg_dirty and bool(_git("ls-files", str(PREREG.relative_to(REPO))))
-    out.append(Check("Hypotheses pre-registered", prereg_ok,
+    out.append(Check("Pre-registered hypotheses", prereg_ok,
                      "bench/preregistration.md committed" if prereg_ok else
                      ("bench/preregistration.md has uncommitted edits" if PREREG.exists() else "bench/preregistration.md missing"),
-                     "Create it (button below), write your hypotheses - including unfavourable ones - and commit it before running."))
+                     "Create it (Open pre-registration), state all hypotheses including unfavourable ones, and commit it before the run."))
     done = read_json(checks_file(settings), {})
     c = commit()
     for label in CHECKS_FOR_SITE.get(cfg.get("site", "lab"), []):
@@ -177,14 +177,14 @@ def readiness(settings: Settings, cfg: dict, paper: bool = True) -> list[Check]:
         ok = bool(r.get("ok")) and r.get("commit") == c and r.get("clean", False)
         detail = ("passed at this commit" if ok else "not run at this commit" if r.get("commit") != c or not r
                   else "failed" if not r.get("ok") else "run with uncommitted changes")
-        out.append(Check(f"Free check: {label}", ok, detail,
-                         "Run it (free) after committing: Run setup > Free checks, or Test Lab > Checks."))
+        out.append(Check(f"Validation: {label}", ok, detail,
+                         "Run it after committing: Configuration > Validation, or Test Lab > Validation."))
     exists = br.out_csv(cfg).exists()
-    out.append(Check("New result file", not exists, br.out_csv(cfg).name + (" already exists" if exists else ""),
-                     "Use a new result name, so rows from different code versions are never mixed."))
+    out.append(Check("Unique output file", not exists, br.out_csv(cfg).name + (" already exists" if exists else ""),
+                     "Use a new result name so that runs from different code versions are never mixed."))
     tasks_all = br.task_names(cfg.get("site", "lab"))
     sel = [t for t in cfg.get("tasks") or [] if t in tasks_all]
-    out.append(Check("Full task set", len(sel) == len(tasks_all), f"{len(sel)} of {len(tasks_all)} tasks",
+    out.append(Check("Complete task suite", len(sel) == len(tasks_all), f"{len(sel)} of {len(tasks_all)} tasks",
                      "A subset must be justified in the paper.", required=False))
     if not paper:
         for ch in out:
@@ -292,7 +292,7 @@ def paper_report(csv_path: Path) -> Path:
     failed = [c for c in meta.get("checklist", []) if c.get("required") and not c.get("ok")]
     args = manifest.get("args", {})
     lines = [f"# Benchmark report: {name}", "",
-             f"**{'PAPER-READY' if meta.get('paper_ready') else 'NOT paper-ready'}** - {meta.get('preset_title', 'custom run')}", "",
+             f"**{'Protocol compliant' if meta.get('paper_ready') else 'Protocol deviations'}** - {meta.get('preset_title', 'custom run')}", "",
              "## Protocol", "",
              f"- Site: {manifest.get('site', 'lab')}; levels: {manifest.get('levels')}",
              f"- Tasks ({len(manifest.get('tasks', []))}): {', '.join(manifest.get('tasks', []))}",
@@ -308,9 +308,9 @@ def paper_report(csv_path: Path) -> Path:
              f"- Machine: {env.get('os', '?')}, Python {env.get('python', '?')}, Node {env.get('node', '?')}",
              "- External agents (stagehand, browser_use) use the same main model, prompts with one disclosed addition, "
              "the same oracles and prices; general agents tested by hand are reported separately (success and time only).",
-             "", "## Deviations from the paper protocol", ""]
+             "", "## Deviations from protocol", ""]
     if not meta:
-        lines += ["- No paper-run checklist was recorded (run started outside Benchmark > Paper run): "
+        lines += ["- No reproducibility checklist was recorded (run not started from Benchmark > Experiment): "
                   "treat this run as exploratory, not as a paper result."]
     else:
         lines += [f"- {c['name']}: {c['detail']}" for c in failed] or ["- none"]

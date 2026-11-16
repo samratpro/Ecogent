@@ -27,8 +27,8 @@ from ecogent import test_shop as ts                                     # noqa: 
 from bench.lab.tasks import Task, USER_INFO, _norm, _numbers, _result, read_rows, read_text  # noqa: E402
 
 BASE_CFG = {"markup": 0, "layout": 0, "copy": 0, "interruptions": 0, "content": 0}
-LEVELS = {0: "original", 1: "code-rebuild", 2: "code-refactor", 3: "code-every-load", 4: "nav-moved",
-          5: "redesign", 6: "wording", 7: "popups", 8: "new-data", 9: "everything"}
+LEVELS = {0: "baseline", 1: "markup-rebuild", 2: "markup-refactor", 3: "markup-per-load", 4: "navigation",
+          5: "redesign", 6: "copy", 7: "interstitials", 8: "data", 9: "combined"}
 LEVEL_CFG = {0: {}, 1: {"markup": 1}, 2: {"markup": 2}, 3: {"markup": 3}, 4: {"layout": 1}, 5: {"layout": 2},
              6: {"copy": 1}, 7: {"interruptions": 2}, 8: {"content": "seed"},
              9: {"markup": 2, "layout": 2, "copy": 1, "interruptions": 2, "content": "seed"}}

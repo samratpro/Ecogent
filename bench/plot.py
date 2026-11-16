@@ -5,6 +5,12 @@ Paper figures from drift benchmark CSVs, as standalone SVG files (no plotting li
   fig2_success.svg        rerun success rate per drift level, one line per system
   fig3_cumulative.svg     cumulative cost over the run sequence (cold, L0..L4): the break-even picture
   fig4_ablations.svg      mean rerun cost at levels 1-4 per ablation (single hue), success % as labels
+  fig5_lookup_steps.svg   which step of Ecogent's element-lookup ladder found each element, per level
+                          (share of lookups; free steps in blues, LLM steps in oranges)
+
+Test-shop results (levels 0-9 = one type of change each, not an amount) are drawn as categories:
+named, angled x labels and markers without connecting lines (a line would suggest a trend between
+unrelated change types).
 
     python bench/plot.py bench/results/main.csv [ablations.csv ...] --out bench/results/figures
 
@@ -37,10 +43,15 @@ SYSTEMS = {
     "compile_only": ("#1baf7a", "triangle", "Compile only"),
     "no_cheap": ("#eda100", "diamond", "Ecogent, no cheap model"),
     "browser_use": ("#e87ba4", "circle", "browser-use"),
+    "browser_use_novision": ("#e87ba4", "diamond", "browser-use, no vision"),
     "stagehand": ("#008300", "square", "Stagehand"),
     "other": ("#8a8984", "triangle", "Other"),
 }
-MAIN = ["ecogent", "compile_only", "nocache", "no_cheap", "browser_use", "stagehand"]
+MAIN = ["ecogent", "compile_only", "nocache", "no_cheap", "browser_use", "browser_use_novision", "stagehand"]
+# Ecogent's lookup ladder, cheapest first: (CSV column, label, colour). Free steps blue, LLM steps orange.
+LADDER = [("cache_hits", "remembered element", "#1d4f91"), ("local_heals", "local re-find", "#2a78d6"),
+          ("local_picks", "obvious pick", "#8cb8ec"), ("llm_lookups", "LLM lookup", "#f2a65a"),
+          ("healed", "LLM heal", "#eb6834"), ("rescued", "LLM rescue", "#a8431c")]
 ABLATION_LABELS = {"ecogent": "Ecogent (full)", "no_identity": "without identity check",
                    "no_alternates": "without alternate locators", "no_refind": "without local re-find",
                    "no_obvious": "without obvious-pick", "no_graded": "without graded LLM views",
@@ -89,6 +100,12 @@ def marker(shape: str, x: float, y: float, color: str, r: float = 4.5) -> str:
     return f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{r:.1f}" {ring}/>'
 
 
+def set_size(w: int, h: int, mb: int) -> None:
+    """Chart size for the next charts (categorical shop charts need room for angled labels)."""
+    global W, H, MB
+    W, H, MB = w, h, mb
+
+
 def frame(title: str, desc: str, ylabel: str, xlabel: str, xticks: list[str], ymax: float, ystep: float,
           unit: str) -> tuple[list[str], callable, callable]:
     pw, ph = W - ML - MR, H - MT - MB
@@ -105,8 +122,13 @@ def frame(title: str, desc: str, ylabel: str, xlabel: str, xticks: list[str], ym
         out.append(f'<line x1="{ML}" x2="{W - MR}" y1="{y:.1f}" y2="{y:.1f}" stroke="{GRID}" stroke-width="1"/>')
         out.append(f'<text x="{ML - 8}" y="{y + 4:.1f}" font-size="11" fill="{INK2}" text-anchor="end">{esc(fmt(v, unit))}</text>')
         v += ystep
+    angled = any(len(t) > 10 for t in xticks)            # long category names (test shop) only
     for i, t in enumerate(xticks):
-        out.append(f'<text x="{xs(i):.1f}" y="{H - MB + 18}" font-size="11" fill="{INK2}" text-anchor="middle">{esc(t)}</text>')
+        if angled:
+            out.append(f'<text transform="translate({xs(i):.1f},{H - MB + 14}) rotate(-35)" font-size="11" fill="{INK2}" '
+                       f'text-anchor="end">{esc(t)}</text>')
+        else:
+            out.append(f'<text x="{xs(i):.1f}" y="{H - MB + 18}" font-size="11" fill="{INK2}" text-anchor="middle">{esc(t)}</text>')
     out.append(f'<text x="{ML + pw / 2:.1f}" y="{H - 10}" font-size="11" fill="{INK2}" text-anchor="middle">{esc(xlabel)}</text>')
     out.append(f'<text transform="translate(16,{MT + ph / 2:.1f}) rotate(-90)" font-size="11" fill="{INK2}" '
                f'text-anchor="middle">{esc(ylabel)}</text>')
@@ -123,8 +145,9 @@ def legend(out: list[str], systems: list[str]) -> None:
 
 
 def lines_chart(path: Path, title: str, desc: str, ylabel: str, xlabel: str, xticks: list[str],
-                series: dict[str, list], unit: str, ci: dict[str, list] | None = None) -> None:
-    """series: system -> list of values (None = missing) aligned with xticks; ci: system -> [(lo, hi)]."""
+                series: dict[str, list], unit: str, ci: dict[str, list] | None = None, connect: bool = True) -> None:
+    """series: system -> list of values (None = missing) aligned with xticks; ci: system -> [(lo, hi)].
+    connect=False for categories (no line between them; systems side by side within each category)."""
     top = max([v for vals in series.values() for v in vals if v is not None] +
               [hi for b in (ci or {}).values() for _, hi in b if hi is not None] + [0])
     ymax, ystep = (100.0, 25.0) if unit == "%" else nice_max(top * 1.05)
@@ -132,22 +155,24 @@ def lines_chart(path: Path, title: str, desc: str, ylabel: str, xlabel: str, xti
     systems = [s for s in MAIN if s in series] + sorted(s for s in series if s not in MAIN)
     legend(out, systems)
     ends = []
-    for s in reversed(systems):             # the reference system (Ecogent) is drawn last, on top
+    slot = (W - ML - MR) / max(1, len(xticks))
+    for k, s in enumerate(reversed(systems)):   # the reference system (Ecogent) is drawn last, on top
         color, shape, name = SYSTEMS.get(s, SYSTEMS["other"])
-        pts = [(xs(i), ys(v)) for i, v in enumerate(series[s]) if v is not None]
+        dx = 0.0 if connect else (len(systems) - 1 - k - (len(systems) - 1) / 2) * min(7.0, slot * 0.7 / max(1, len(systems)))
+        pts = [(xs(i) + dx, ys(v)) for i, v in enumerate(series[s]) if v is not None]
         if ci and s in ci:
             for i, (lo, hi) in enumerate(ci[s]):
                 if lo is None:
                     continue
-                x = xs(i)
+                x = xs(i) + dx
                 out.append(f'<path d="M{x:.1f},{ys(lo):.1f}V{ys(hi):.1f}M{x - 3:.1f},{ys(lo):.1f}H{x + 3:.1f}'
                            f'M{x - 3:.1f},{ys(hi):.1f}H{x + 3:.1f}" stroke="{color}" stroke-width="1" fill="none" opacity="0.8"/>')
-        if len(pts) > 1:
+        if connect and len(pts) > 1:
             d = "M" + " L".join(f"{x:.1f},{y:.1f}" for x, y in pts)
             out.append(f'<path d="{d}" stroke="{color}" stroke-width="2" fill="none" stroke-linejoin="round"/>')
         for x, y in pts:
             out.append(marker(shape, x, y, color))
-        if pts:
+        if pts and connect:                 # categories: the legend names the systems, no end labels
             ends.append([pts[-1][1], pts[-1][0], name])
     ends.sort()
     for i in range(1, len(ends)):                    # direct labels: keep 13px apart
@@ -198,6 +223,33 @@ def boot(vals: list[float]) -> tuple[float | None, float | None]:
     return tuple(float(x) for x in np.percentile(m, [2.5, 97.5]))
 
 
+def stacked_chart(path: Path, title: str, desc: str, xlabel: str, xticks: list[str], shares: list[dict],
+                  counts: list[int]) -> None:
+    """One 100% bar per level: share of element lookups per ladder step (LADDER order, bottom = cheapest)."""
+    xticks = [f"{t} (n={n})" for t, n in zip(xticks, counts)]
+    out, xs, ys = frame(title, desc, "share of element lookups", xlabel, xticks, 100.0, 25.0, "%")
+    for row, (y, steps) in enumerate(((30, LADDER[:3]), (46, LADDER[3:]))):     # legend: free row, LLM row
+        x = ML
+        out.append(f'<text x="{x}" y="{y + 9}" font-size="11" fill="{INK2}">{"no LLM:" if row == 0 else "LLM:"}</text>')
+        x += 56
+        for _, label, color in steps:
+            out.append(f'<rect x="{x}" y="{y}" width="10" height="10" rx="2" fill="{color}"/>')
+            out.append(f'<text x="{x + 14}" y="{y + 9}" font-size="11" fill="{INK2}">{esc(label)}</text>')
+            x += 24 + 6.2 * len(label)
+    bw = min(34.0, (W - ML - MR) / max(1, len(xticks)) * 0.6)
+    for i, (sh, n) in enumerate(zip(shares, counts)):
+        base = 0.0
+        for col, label, color in LADDER:
+            v = 100 * sh.get(col, 0.0)
+            if v > 0:
+                out.append(f'<rect x="{xs(i) - bw / 2:.1f}" y="{ys(base + v):.1f}" width="{bw:.1f}" '
+                           f'height="{ys(base) - ys(base + v):.1f}" fill="{color}" stroke="{SURFACE}" stroke-width="1">'
+                           f'<title>{esc(label)}: {v:.0f}%</title></rect>')
+            base += v
+    out.append("</svg>")
+    path.write_text("\n".join(out), encoding="utf-8")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("csv", nargs="+")
@@ -214,7 +266,15 @@ def main() -> None:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     levels = sorted({int(r["level"]) for r in rows if r["phase"] == "rerun"})
-    xt = [f"L{lv}" for lv in levels]
+    names = {int(r["level"]): r.get("level_name", "") for r in rows}
+    shop = any(r.get("level_name") == "baseline" for r in rows)     # test shop: categories, not amounts
+    if shop:
+        set_size(820, 430, 112)
+        xt = [names[lv] or f"L{lv}" for lv in levels]
+        xlab = "change type (one per level)"
+    else:
+        xt = [f"L{lv}" for lv in levels]
+        xlab = "drift level (L0 none ... L4 redesign)"
     reruns = [r for r in rows if r["phase"] == "rerun"]
     by = defaultdict(list)
     for r in reruns:
@@ -223,15 +283,15 @@ def main() -> None:
 
     cost = {v: [np.mean([r["_cost"] for r in by[(v, lv)]]) if by[(v, lv)] else None for lv in levels] for v in main_vars}
     ci = {v: [boot([r["_cost"] for r in by[(v, lv)]]) if by[(v, lv)] else (None, None) for lv in levels] for v in main_vars}
-    lines_chart(out / "fig1_rerun_cost.svg", "Rerun cost by amount of site change",
+    lines_chart(out / "fig1_rerun_cost.svg", "Rerun cost by type of site change" if shop else "Rerun cost by amount of site change",
                 "Mean LLM cost of rerunning a compiled task after the site changed, per drift level and system; "
                 "whiskers are 95% bootstrap confidence intervals.",
-                f"mean cost per rerun ({unit})", "drift level (L0 none ... L4 redesign)", xt, cost, unit, ci)
+                f"mean cost per rerun ({unit})", xlab, xt, cost, unit, ci, connect=not shop)
     succ = {v: [100 * np.mean([int(r["success"]) for r in by[(v, lv)]]) if by[(v, lv)] else None for lv in levels]
             for v in main_vars}
-    lines_chart(out / "fig2_success.svg", "Rerun success by amount of site change",
+    lines_chart(out / "fig2_success.svg", "Rerun success by type of site change" if shop else "Rerun success by amount of site change",
                 "Share of reruns the oracle scored as successful, per drift level and system.",
-                "successful reruns", "drift level (L0 none ... L4 redesign)", xt, succ, "%")
+                "successful reruns", xlab, xt, succ, "%", connect=not shop)
     seqs = defaultdict(list)
     for r in rows:
         if r["variant"] in main_vars and r["phase"] in ("cold", "rerun"):
@@ -247,7 +307,7 @@ def main() -> None:
     n = max((len(c) for c in cum.values()), default=0)
     lines_chart(out / "fig3_cumulative.svg", "Cumulative cost over repeated runs",
                 "Mean cumulative LLM cost over the sequence: cold run, then one rerun per drift level.",
-                f"cumulative cost ({unit})", "run sequence", ["cold"] + [f"L{i}" for i in levels][:n - 1],
+                f"cumulative cost ({unit})", "run sequence", ["cold"] + xt[:n - 1],
                 {v: c + [None] * (n - len(c)) for v, c in cum.items()}, unit)
     abl = sorted(v for v in {r["variant"] for r in rows} if v.startswith("no_") or v == "ecogent")
     if len(abl) > 1:
@@ -262,6 +322,19 @@ def main() -> None:
         bars_chart(out / "fig4_ablations.svg", "What each part of the repair ladder saves",
                    "Mean rerun cost at drift levels 1-4 with one part of the ladder switched off; "
                    "labels give the success rate.", labels, vals, notes, unit)
+    eco = [r for r in reruns if r["variant"] == "ecogent"]
+    if eco:
+        shares, counts = [], []
+        for lv in levels:
+            g = [r for r in eco if int(r["level"]) == lv]
+            tot = {c: sum(int(float(r.get(c) or 0)) for r in g) for c, _, _ in LADDER}
+            n_all = sum(tot.values())
+            shares.append({c: (v / n_all if n_all else 0.0) for c, v in tot.items()})
+            counts.append(n_all)
+        if any(counts):
+            stacked_chart(out / "fig5_lookup_steps.svg", "Which step of the ladder found each element",
+                          "Ecogent reruns: share of element lookups solved by each step, cheapest first "
+                          "(blue = no LLM, orange = LLM); n = number of lookups.", xlab, xt, shares, counts)
     print(f"Figures written to {out}")
 
 

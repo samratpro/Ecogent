@@ -32,7 +32,7 @@ REPO = Path(__file__).resolve().parents[1]
 BENCH = REPO / "bench"
 RESULTS = BENCH / "results"
 INTERNAL = ["ecogent", "nocache", "compile_only", "no_cheap"]
-EXTERNAL = ["stagehand", "browser_use"]
+EXTERNAL = ["stagehand", "browser_use", "browser_use_novision"]
 VARIANTS = INTERNAL + EXTERNAL + sorted(a for a in ABLATIONS if a != "no_repair")
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 SCHEDULE_MODES = ["off", "once", "daily", "weekly"]
@@ -83,8 +83,8 @@ def save_config(settings: Settings, cfg: dict) -> None:
 
 
 SITE_LEVELS = {"lab": {0: "none", 1: "attributes", 2: "structure", 3: "text", 4: "redesign"},
-               "shop": {0: "original", 1: "code-rebuild", 2: "code-refactor", 3: "code-every-load", 4: "nav-moved",
-                        5: "redesign", 6: "wording", 7: "popups", 8: "new-data", 9: "everything"}}
+               "shop": {0: "baseline", 1: "markup-rebuild", 2: "markup-refactor", 3: "markup-per-load", 4: "navigation",
+                        5: "redesign", 6: "copy", 7: "interstitials", 8: "data", 9: "combined"}}
 
 
 def task_names(site: str = "lab") -> list[str]:
@@ -170,16 +170,17 @@ def count_runs(cfg: dict) -> tuple[int, int]:
     cells = runs = 0
     for v in cfg.get("variants") or []:
         cells += per_seed
-        twice = v not in ("nocache", "browser_use") and not cfg.get("no_rerun2")
+        twice = v not in ("nocache", "browser_use", "browser_use_novision") and not cfg.get("no_rerun2")
         runs += per_seed * (1 + levels * (2 if twice else 1))
     return cells, runs
 
 
 def free_check_commands(scratch: Path) -> dict[str, list[str]]:
     """No-cost checks: the lab self-test and the fake-LLM plumbing run of drift_bench."""
-    return {"Lab self-test": [sys.executable, "-u", "-m", "bench.lab.selftest"],
-            "Fake-LLM benchmark run": [sys.executable, "-u", "-m", "bench.lab.fake_run", str(scratch)],
-            "Shop task self-test": [sys.executable, "-u", "-m", "bench.shop_selftest"]}
+    return {"Lab integrity test": [sys.executable, "-u", "-m", "bench.lab.selftest"],
+            "Pipeline test (mock LLM)": [sys.executable, "-u", "-m", "bench.lab.fake_run", str(scratch)],
+            "Shop oracle test": [sys.executable, "-u", "-m", "bench.shop_selftest"],
+            "Lab visual invariance test": [sys.executable, "-u", "-m", "bench.lab.look_check"]}
 
 
 # ----------------------------------------------------------------------------- schedule

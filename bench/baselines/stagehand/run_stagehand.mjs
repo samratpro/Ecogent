@@ -120,6 +120,11 @@ async function run() {
   }
 }
 
+// Stagehand writes an agent cache entry only for a run the agent itself reports as successful (seen in the
+// benchmark: a failed cold run left the cache empty, so every restored rerun started without a cache).
+// Count the entries so the benchmark can report it instead of guessing.
+const cacheFiles = () => { try { return fs.readdirSync(cfg.cache_dir).filter((f) => f.endsWith(".json")).length; } catch { return 0; } };
+const cacheBefore = cacheFiles();
 const t0 = Date.now();
 let result;
 try {
@@ -130,5 +135,7 @@ try {
              model: `${cfg.llm.provider}:${cfg.llm.model}` };
 }
 result.seconds = Math.round((Date.now() - t0) / 100) / 10;
+result.cache_entries_before = cacheBefore;
+result.cache_entries_after = cacheFiles();
 fs.writeFileSync(path.join(out, "result.json"), JSON.stringify(result, null, 2));
 process.exit(0);

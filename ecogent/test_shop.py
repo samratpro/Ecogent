@@ -22,10 +22,10 @@ SHOP = REPO / "test_shop"
 PORT = 3010
 BASE = f"http://127.0.0.1:{PORT}"
 PUBLIC_URL = f"http://localhost:{PORT}"
-AXES = {"markup": ["base", "rebuild (hashed names)", "refactor (wrappers, tags, order)", "new names every load"],
-        "layout": ["base", "menu drawer, top filters", "full redesign"],
-        "copy": ["base wording", "rewritten labels"],
-        "interruptions": ["none", "cookie banner", "+ newsletter popup"]}
+AXES = {"markup": ["baseline", "rebuild (hashed class names)", "refactor (wrappers, tags, DOM order)", "per-load class names"],
+        "layout": ["baseline", "navigation and filters relocated", "redesign"],
+        "copy": ["baseline", "rewritten labels"],
+        "interruptions": ["none", "cookie banner", "cookie banner + newsletter modal"]}
 
 
 def available() -> bool:
@@ -193,5 +193,5 @@ class ShopServer:
 
 
 def check_commands() -> dict[str, list[str]]:
-    return {"Shop look check": [sys.executable, "-u", str(SHOP / "check_look.py"), "--base", BASE],
-            "Shop flow check": [sys.executable, "-u", str(SHOP / "check_flows.py"), "--base", BASE]}
+    return {"Shop visual invariance test": [sys.executable, "-u", str(SHOP / "check_look.py"), "--base", BASE],
+            "Shop task-completion test": [sys.executable, "-u", str(SHOP / "check_flows.py"), "--base", BASE]}

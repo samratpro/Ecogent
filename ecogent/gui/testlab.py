@@ -1,10 +1,10 @@
 """
 Test Lab window (sidebar -> Test Lab): the neutral test shop on port 3010.
 
-  1. Shop        status, Start / Stop, open it in the browser
-  2. Scenarios   one-click site versions with a plain explanation (base, code change, redesign, new data, ...)
-  3. Advanced    each setting on its own (code, layout, wording, popups, data)
-  4. Checks      free look / flow checks, with their last result, and a log
+  Server                   status, Start / Stop server, open in browser
+  Scenarios                one-click site versions (baseline, markup, navigation, redesign, copy, interstitials, data)
+  Custom configuration     each dimension set separately (markup, layout, copy, interstitials, data)
+  Validation and tools     visual invariance and task-completion tests with their last result, and a log
 
 The app owns the shop server and the check process (closing the window stops neither).
 """
@@ -25,21 +25,21 @@ from .style import DANGER, SUCCESS, SUBTLE as MUTED, WARNING as WARN
 BASE = {"markup": 0, "layout": 0, "copy": 0, "interruptions": 0, "content": 0}
 # (title, what a visitor / agent would notice, settings) - each one a real-world kind of website change.
 SCENARIOS = [
-    ("Original shop", "The starting point. Run every task here first.", {}),
-    ("Rebuilt code", "Developers rebuilt the site: class names and test ids change. Looks exactly the same.", {"markup": 1}),
-    ("Refactored code", "Extra wrappers, buttons become divs, code order changes. Looks exactly the same.", {"markup": 2}),
-    ("New code every visit", "Class names change on every page load, like some modern builds. Looks the same.", {"markup": 3}),
-    ("Moved navigation", "Categories move into a Menu drawer, filters into a top bar, 'Load more' instead of pages.", {"layout": 1}),
-    ("Full redesign", "New listing grid, filter dialog, colour swatches, one-page checkout.", {"layout": 2}),
-    ("New wording", "Labels rewritten: 'Add to bag', 'Check out', 'Log in', 'Promo code' ...", {"copy": 1}),
-    ("Popups", "Cookie banner plus a newsletter popup that blocks the page.", {"interruptions": 2}),
-    ("New data", "Prices, stock and some products change. Layout stays the same. (Clears carts and orders.)", {"content": 1}),
-    ("Everything changed", "Refactored code + redesign + new wording + popups + new data, all at once.",
+    ("Baseline", "Unmodified site. Cold runs start here.", {}),
+    ("Markup rebuild", "Class names and test IDs regenerated, as after a rebuild. Rendering unchanged.", {"markup": 1}),
+    ("Markup refactor", "Wrapper elements, role-based buttons, reordered DOM. Rendering unchanged.", {"markup": 2}),
+    ("Per-load markup", "Class names regenerated on every page load. Rendering unchanged.", {"markup": 3}),
+    ("Navigation change", "Categories in a menu drawer, filters in a top bar, incremental loading.", {"layout": 1}),
+    ("Redesign", "New listing grid, filter dialog, colour swatches, single-page checkout.", {"layout": 2}),
+    ("Copy change", "Interface labels rewritten ('Add to bag', 'Check out', 'Log in', 'Promo code').", {"copy": 1}),
+    ("Interstitials", "Cookie banner and a blocking newsletter modal.", {"interruptions": 2}),
+    ("Data change", "Prices, stock and part of the catalogue change; layout unchanged. Clears session data.", {"content": 1}),
+    ("Combined changes", "Markup refactor, redesign, copy change, interstitials and data change together.",
      {"markup": 2, "layout": 2, "copy": 1, "interruptions": 2, "content": 1}),
 ]
-TITLES = {"markup": "Code (same look)", "layout": "Layout", "copy": "Wording", "interruptions": "Popups"}
-CHECK_HELP = {"Shop look check": "Proves code changes keep the exact same look (pixels and words).",
-              "Shop flow check": "Proves a normal user can buy a product in every version."}
+TITLES = {"markup": "Markup", "layout": "Layout", "copy": "Copy", "interruptions": "Interstitials"}
+CHECK_HELP = {"Shop visual invariance test": "Verifies that markup changes leave rendering and visible text unchanged.",
+              "Shop task-completion test": "Verifies that a scripted user can complete a purchase in every version."}
 
 
 class LabControls:
@@ -53,7 +53,7 @@ class LabControls:
 
 def describe(c: dict) -> str:
     parts = [f"{TITLES[k]}: {ts.AXES[k][c[k]]}" for k in TITLES]
-    parts.append(f"Data: {'original' if not c['content'] else 'changed #' + str(c['content'])}")
+    parts.append(f"Data: {'baseline' if not c['content'] else 'variant ' + str(c['content'])}")
     return "   ·   ".join(parts)
 
 
@@ -67,8 +67,8 @@ class TestLabDialog(Dialog):
         if not ts.available():
             dpg.add_text("The test_shop/ folder was not found next to the ecogent package.", color=WARN, parent=p)
             return
-        st.font(dpg.add_text("A practice web shop for testing browser agents when a website changes. Every agent "
-                             "sees the same version; agents never see these controls or the right answers.",
+        st.font(dpg.add_text("Controlled e-commerce environment for evaluating browser agents under website change. All clients "
+                             "receive the same version; configuration and ground truth are not accessible to agents.",
                              color=MUTED, wrap=940, parent=p), "small")
         # ---- 1. shop status
         with dpg.child_window(height=92, border=True, parent=p) as card:
@@ -80,15 +80,15 @@ class TestLabDialog(Dialog):
                     self.version_text = dpg.add_text("", color=MUTED, wrap=600)
                     st.font(self.version_text, "small")
                 dpg.add_spacer(width=10)
-                self.toggle_btn = dpg.add_button(label="Start shop", width=130, height=40, callback=self._toggle)
-                dpg.bind_item_theme(dpg.add_button(label="Open shop", height=40, callback=lambda: webbrowser.open(ts.PUBLIC_URL)),
+                self.toggle_btn = dpg.add_button(label="Start server", width=130, height=40, callback=self._toggle)
+                dpg.bind_item_theme(dpg.add_button(label="Open in browser", height=40, callback=lambda: webbrowser.open(ts.PUBLIC_URL)),
                                     "btn_secondary")
                 st.icon_button("refresh", "Refresh", self.refresh, fallback="Refresh")
         # ---- 2. scenarios
         dpg.add_spacer(height=4, parent=p)
         with dpg.group(horizontal=True, parent=p):
-            st.section_label("1. Pick a scenario")
-            st.font(dpg.add_text("one click changes the shop for everyone", color=MUTED), "small")
+            st.section_label("Scenarios")
+            st.font(dpg.add_text("applied to all clients", color=MUTED), "small")
         with dpg.table(header_row=False, policy=dpg.mvTable_SizingStretchSame, parent=p):
             for _ in range(2):
                 dpg.add_table_column()
@@ -102,7 +102,7 @@ class TestLabDialog(Dialog):
                             st.font(dpg.add_text(desc, color=MUTED, wrap=440), "small")
         self.msg = dpg.add_text("", color=WARN, parent=p)
         # ---- 3. advanced
-        with dpg.collapsing_header(label="2. Advanced: set each part yourself", default_open=False, parent=p):
+        with dpg.collapsing_header(label="Custom configuration", default_open=False, parent=p):
             self.combos: dict[str, int] = {}
             with dpg.table(header_row=False, policy=dpg.mvTable_SizingFixedFit):
                 dpg.add_table_column()
@@ -116,22 +116,22 @@ class TestLabDialog(Dialog):
                     with dpg.group(horizontal=True):
                         self.content = dpg.add_input_int(default_value=0, min_value=0, max_value=999, min_clamped=True,
                                                          max_clamped=True, width=150)
-                        st.font(dpg.add_text("0 = original; 1, 2, ... = different changed data", color=MUTED), "small")
-            dpg.bind_item_theme(dpg.add_button(label="Apply these settings", callback=self._apply_advanced), "btn_primary")
+                        st.font(dpg.add_text("0 = baseline; 1, 2, ... = data variants", color=MUTED), "small")
+            dpg.bind_item_theme(dpg.add_button(label="Apply", callback=self._apply_advanced), "btn_primary")
         # ---- 4. checks + tools
         dpg.add_spacer(height=4, parent=p)
-        st.section_label("3. Checks and tools", parent=p)
+        st.section_label("Validation and tools", parent=p)
         with dpg.group(horizontal=True, parent=p):
             self.check_btns = []
             for label in ts.check_commands():
-                b = dpg.add_button(label=f"Run {label.lower().replace('shop ', '')}", user_data=label, callback=lambda s, a, u: self._check(u))
+                b = dpg.add_button(label=label.replace("Shop ", "").capitalize(), user_data=label, callback=lambda s, a, u: self._check(u))
                 dpg.bind_item_theme(b, "btn_secondary")
                 with dpg.tooltip(b):
-                    dpg.add_text(CHECK_HELP[label] + " Free, about 1-2 minutes.")
+                    dpg.add_text(CHECK_HELP[label] + " No API cost; about 1-2 minutes.")
                 self.check_btns.append(b)
             dpg.add_spacer(width=12)
-            dpg.bind_item_theme(dpg.add_button(label="Clear carts and orders", callback=self._reset), "btn_ghost")
-            dpg.bind_item_theme(dpg.add_button(label="Lab page (browser)", callback=lambda: webbrowser.open(ts.lab_page_url())), "btn_ghost")
+            dpg.bind_item_theme(dpg.add_button(label="Reset session data", callback=self._reset), "btn_ghost")
+            dpg.bind_item_theme(dpg.add_button(label="Lab console", callback=lambda: webbrowser.open(ts.lab_page_url())), "btn_ghost")
         self.results_text = dpg.add_text("", parent=p)
         st.font(self.results_text, "small")
         self.log = dpg.add_input_text(multiline=True, readonly=True, width=-1, height=-1, parent=p,
@@ -151,16 +151,16 @@ class TestLabDialog(Dialog):
         try:
             r = ts.lab(path, body)
         except (OSError, ValueError) as e:
-            dpg.set_value(self.msg, "The shop is not running - press Start shop first." if isinstance(e, OSError) else f"Refused: {e}")
+            dpg.set_value(self.msg, "Server not running. Start the server first." if isinstance(e, OSError) else f"Request rejected: {e}")
             dpg.configure_item(self.msg, color=WARN)
             return
-        dpg.set_value(self.msg, done + ("  Carts and orders were cleared (new data)." if r.get("reset") else ""))
+        dpg.set_value(self.msg, done + ("  Session data cleared (data change)." if r.get("reset") else ""))
         dpg.configure_item(self.msg, color=SUCCESS)
         self.refresh()
 
     def _apply(self, cfg: dict) -> None:
-        name = next((t for t, _, c in SCENARIOS if {**BASE, **c} == cfg), "Custom version")
-        self._call("/config", cfg, f"Applied: {name}.  Reload the shop page in the browser to see it.")
+        name = next((t for t, _, c in SCENARIOS if {**BASE, **c} == cfg), "Custom configuration")
+        self._call("/config", cfg, f"Applied: {name}. Reload open shop pages to see it.")
 
     def _apply_advanced(self, *_) -> None:
         cfg = {k: int(dpg.get_value(w).split(" ", 1)[0]) for k, w in self.combos.items()}
@@ -168,11 +168,11 @@ class TestLabDialog(Dialog):
         self._apply(cfg)
 
     def _reset(self, *_) -> None:
-        self._call("/reset", {}, "Carts, orders and the event log were cleared.")
+        self._call("/reset", {}, "Session data and event log cleared.")
 
     def _check(self, label: str) -> None:
         if self.config is None:
-            dpg.set_value(self.msg, "Start the shop first - the checks need it running.")
+            dpg.set_value(self.msg, "Start the server first; validation requires it.")
             dpg.configure_item(self.msg, color=WARN)
             return
         self.ctl.run_check(label)
@@ -196,20 +196,20 @@ class TestLabDialog(Dialog):
             c = s["config"]
             dpg.set_value(self.state_text, f"●  Running at {ts.PUBLIC_URL}")
             dpg.configure_item(self.state_text, color=SUCCESS)
-            dpg.set_value(self.version_text, f"{describe(c)}\n{len(s['orders'])} orders, {len(s['events'])} actions recorded since the last clear")
-            dpg.configure_item(self.toggle_btn, label="Stop shop")
+            dpg.set_value(self.version_text, f"{describe(c)}\n{len(s['orders'])} orders, {len(s['events'])} events since the last reset")
+            dpg.configure_item(self.toggle_btn, label="Stop server")
             dpg.bind_item_theme(self.toggle_btn, "btn_danger")
             for k, labels in ts.AXES.items():
                 dpg.set_value(self.combos[k], f"{c[k]} - {labels[c[k]]}")
             dpg.set_value(self.content, c["content"])
         else:
-            text, color = {"starting": ("◌  Starting...  the first start installs and builds (about a minute)", WARN),
+            text, color = {"starting": ("◌  Starting (first start installs dependencies and builds; about one minute)", WARN),
                            "running": ("◌  Starting...", WARN),
-                           "failed": ("✕  Could not start - see the log below", DANGER)}.get(state, ("○  Stopped", MUTED))
+                           "failed": ("✕  Start failed; see the log below", DANGER)}.get(state, ("○  Stopped", MUTED))
             dpg.set_value(self.state_text, text)
             dpg.configure_item(self.state_text, color=color)
-            dpg.set_value(self.version_text, "Press Start shop. It runs on your computer only (localhost:3010).")
-            dpg.configure_item(self.toggle_btn, label="Start shop", enabled=state != "starting")
+            dpg.set_value(self.version_text, "Local server on localhost:3010.")
+            dpg.configure_item(self.toggle_btn, label="Start server", enabled=state != "starting")
             dpg.bind_item_theme(self.toggle_btn, "btn_primary")
         cur = {k: self.config[k] for k in BASE} if self.config else None
         for b, cfg in self.scenario_btns:
@@ -219,7 +219,7 @@ class TestLabDialog(Dialog):
             dpg.configure_item(b, enabled=not busy)
         res = self.ctl.last_results()
         parts = [f"{k}: {v}" for k, v in res.items()]
-        dpg.set_value(self.results_text, ("Running a check...   " if busy else "") + ("   ·   ".join(parts) or "No check run yet."))
+        dpg.set_value(self.results_text, ("Validation running...   " if busy else "") + ("   ·   ".join(parts) or "No validation run yet."))
         dpg.configure_item(self.results_text, color=DANGER if any("FAIL" in v for v in res.values()) else
                            SUCCESS if res else MUTED)
 

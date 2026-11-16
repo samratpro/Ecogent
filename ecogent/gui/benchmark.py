@@ -32,7 +32,8 @@ VARIANT_HELP = {
     "compile_only": "plan once, never repair on reruns (Agentic-Compilation-style baseline)",
     "no_cheap": "Ecogent with the cheap model off (main model for every job)",
     "stagehand": "external: Stagehand v3 cache + selfHeal (needs node + npm install)",
-    "browser_use": "external: browser-use, LLM decides every step (needs .venv-baselines)",
+    "browser_use": "external: browser-use, LLM decides every step, screenshots on as shipped (needs .venv-baselines)",
+    "browser_use_novision": "external: browser-use with screenshots off (text only, like Ecogent's page view)",
     **{k: f"ablation: {v}" for k, v in ABLATIONS.items()},
 }
 
@@ -55,13 +56,13 @@ class BenchmarkDialog(Dialog):
             return
         self.tabs: dict[str, int] = {}
         with dpg.tab_bar(parent=self.tag) as self.tab_bar:
-            with dpg.tab(label=" Paper run ") as self.tabs["paper"]:
+            with dpg.tab(label=" Experiment ") as self.tabs["paper"]:
                 self._build_paper()
             with dpg.tab(label=" Results ") as self.tabs["results"]:
                 self._build_results()
-            with dpg.tab(label=" Run setup ") as self.tabs["run"]:
+            with dpg.tab(label=" Configuration ") as self.tabs["run"]:
                 self._build_run()
-            with dpg.tab(label=" Output ") as self.tabs["output"]:
+            with dpg.tab(label=" Log ") as self.tabs["output"]:
                 self._build_output()
             with dpg.tab(label=" Schedule ") as self.tabs["schedule"]:
                 self._build_schedule()
@@ -71,8 +72,8 @@ class BenchmarkDialog(Dialog):
 
     # ------------------------------------------------------------------ paper run tab
     def _build_paper(self) -> None:
-        st.font(dpg.add_text("A run for the paper must pass the checks reviewers look at. The checklist is saved with "
-                             "the results (meta.json), and anything that failed is listed as a deviation in the report.",
+        st.font(dpg.add_text("Runs intended for publication must satisfy the reproducibility checklist. The checklist is stored "
+                             "with the results (meta.json); unmet requirements are reported as deviations.",
                              color=MUTED, wrap=1000), "small")
         keys = list(pm.PRESETS)
         with dpg.group(horizontal=True):
@@ -82,35 +83,35 @@ class BenchmarkDialog(Dialog):
         self.paper_about = dpg.add_text("", color=MUTED, wrap=1000)
         with dpg.group(horizontal=True, horizontal_spacing=18):
             self.paper_name = dpg.add_input_text(label="Result name", width=260, callback=self.paper_check)
-            self.paper_date = dpg.add_input_text(label="Price date", hint="YYYY-MM-DD", width=120,
+            self.paper_date = dpg.add_input_text(label="Pricing date", hint="YYYY-MM-DD", width=120,
                                                  default_value=self.cfg.get("price_date", ""), callback=self.paper_check)
         self.paper_prices = dpg.add_text("", color=MUTED, wrap=1000)
         st.font(self.paper_prices, "small")
         dpg.add_spacer(height=2)
         with dpg.group(horizontal=True):
-            st.section_label("Checklist")
-            dpg.add_button(label="Re-check", small=True, callback=self.paper_check)
+            st.section_label("Reproducibility checklist")
+            dpg.add_button(label="Refresh", small=True, callback=self.paper_check)
         self.paper_table = dpg.add_group()
         self.paper_verdict = dpg.add_text("")
         st.font(self.paper_verdict, "semibold")
         with dpg.group(horizontal=True):
-            self.paper_go = dpg.add_button(label="Start paper run", width=170, callback=lambda: self._paper_start(False))
+            self.paper_go = dpg.add_button(label="Run experiment", width=170, callback=lambda: self._paper_start(False))
             dpg.bind_item_theme(self.paper_go, "btn_primary")
-            self.paper_force = dpg.add_button(label="Start anyway (marked NOT paper-ready)", callback=lambda: self._paper_start(True))
+            self.paper_force = dpg.add_button(label="Run with deviations", callback=lambda: self._paper_start(True))
             dpg.bind_item_theme(self.paper_force, "btn_ghost")
             dpg.add_spacer(width=16)
-            dpg.bind_item_theme(dpg.add_button(label="Pre-registration file", callback=self._prereg), "btn_secondary")
+            dpg.bind_item_theme(dpg.add_button(label="Open pre-registration", callback=self._prereg), "btn_secondary")
             with dpg.tooltip(dpg.last_item()):
                 dpg.add_text("Creates bench/preregistration.md from a template (if missing) and opens it. "
-                             "Write your hypotheses, then commit it before the paid run.")
+                             "State the hypotheses, then commit the file before the run.")
         dpg.add_separator()
         with dpg.group(horizontal=True):
-            st.section_label("After the run")
+            st.section_label("Report")
             self.report_combo = dpg.add_combo([], width=320)
-            dpg.bind_item_theme(dpg.add_button(label="Make paper report", callback=self._paper_report), "btn_secondary")
+            dpg.bind_item_theme(dpg.add_button(label="Generate report", callback=self._paper_report), "btn_secondary")
             with dpg.tooltip(dpg.last_item()):
-                dpg.add_text("Protocol + deviations + statistics (mean ± sd, 95% CI, paired tests, cost of ownership) + figures, "
-                             "in one markdown file")
+                dpg.add_text("Protocol, deviations, statistics (mean ± sd, 95% CI, paired tests, cost of ownership) "
+                             "and figures in one Markdown file")
         self.report_msg = dpg.add_text("", color=MUTED)
         self._paper_preset_changed()
 
@@ -121,7 +122,7 @@ class BenchmarkDialog(Dialog):
     def _paper_preset_changed(self, *_) -> None:
         key = self._paper_key()
         p = pm.PRESETS[key]
-        dpg.set_value(self.paper_about, p["about"] + ("" if p["paper"] else "  The checklist is shown for information only."))
+        dpg.set_value(self.paper_about, p["about"] + ("" if p["paper"] else "  The checklist is informational for this experiment."))
         dpg.set_value(self.paper_name, pm.preset_config(key, self.cfg)["out_name"])
         self.paper_check()
 
@@ -139,25 +140,25 @@ class BenchmarkDialog(Dialog):
         key, cfg = self._paper_cfg()
         paper = pm.PRESETS[key]["paper"]
         checks = pm.readiness(self.settings, cfg, paper)
-        dpg.set_value(self.paper_prices, f"Prices (edit in Run setup): {cfg.get('prices') or 'none'}  ·  "
+        dpg.set_value(self.paper_prices, f"Pricing (edit in Configuration): {cfg.get('prices') or 'none'}  ·  "
                       f"{br.count_runs(cfg)[1]} runs, site {cfg['site']}, seeds {cfg['seeds']}")
         dpg.delete_item(self.paper_table, children_only=True)
         with dpg.table(parent=self.paper_table, header_row=True, policy=dpg.mvTable_SizingStretchProp, borders_innerH=True,
                        row_background=True, scrollY=True, height=300):
-            for col in ("", "Check", "Now", "How to fix"):
+            for col in ("Status", "Requirement", "Current state", "Action required"):
                 dpg.add_table_column(label=col)
             for ch in checks:
                 with dpg.table_row():
-                    mark, col = ("OK", SUCCESS) if ch.ok else (("NO", DANGER) if ch.required else ("!", WARN))
+                    mark, col = ("Pass", SUCCESS) if ch.ok else (("Fail", DANGER) if ch.required else ("Warning", WARN))
                     dpg.add_text(mark, color=col)
-                    dpg.add_text(ch.name + ("" if ch.required else " (advice)"))
+                    dpg.add_text(ch.name + ("" if ch.required else " (recommended)"))
                     dpg.add_text(ch.detail, wrap=280)
                     dpg.add_text("" if ch.ok else ch.fix, wrap=380, color=MUTED)
         ok = pm.ready(checks)
         n_bad = sum(1 for c in checks if c.required and not c.ok)
-        dpg.set_value(self.paper_verdict, "Ready for a paper run." if ok and paper else
-                      "Pilot: runs are never marked paper-ready." if not paper else
-                      f"Not ready: {n_bad} required check(s) failed. Fix them, or start anyway and report the deviations.")
+        dpg.set_value(self.paper_verdict, "All requirements met." if ok and paper else
+                      "Exploratory experiment: not marked as protocol compliant." if not paper else
+                      f"{n_bad} requirement(s) not met. Resolve them, or run with deviations (they are recorded in the report).")
         dpg.configure_item(self.paper_verdict, color=SUCCESS if ok and paper else WARN if not paper else DANGER)
         running = self.ctl.running()
         dpg.configure_item(self.paper_go, enabled=(ok or not paper) and not running and not br.validate(cfg))
@@ -176,9 +177,9 @@ class BenchmarkDialog(Dialog):
             return
         cells, runs = br.count_runs(cfg)
         bad = [c.name for c in checks if c.required and not c.ok]
-        msg = (f"Start '{pm.PRESETS[key]['title']}'?\n\n{runs} runs in {cells} cells -> {cfg['out_name']}.csv. "
-               "This calls the paid API and can take many hours; a browser window opens for every cell.\n"
-               + ("\nNOT paper-ready - these deviations will be recorded and listed in the report:\n- " + "\n- ".join(bad) if bad else ""))
+        msg = (f"Run '{pm.PRESETS[key]['title']}'?\n\n{runs} runs in {cells} cells -> {cfg['out_name']}.csv. "
+               "This uses the paid API and may take several hours; a browser window opens for each cell.\n"
+               + ("\nUnmet requirements (recorded as deviations):\n- " + "\n- ".join(bad) if bad else ""))
 
         def go(yes: bool) -> None:
             if not yes:
@@ -200,9 +201,9 @@ class BenchmarkDialog(Dialog):
     def _paper_report(self, *_) -> None:
         name = dpg.get_value(self.report_combo)
         if not name:
-            dpg.set_value(self.report_msg, "No result file yet.")
+            dpg.set_value(self.report_msg, "No result file available.")
             return
-        dpg.set_value(self.report_msg, f"Making the report for {name} (summary + figures)...")
+        dpg.set_value(self.report_msg, f"Generating report for {name}...")
 
         def job() -> None:
             try:
@@ -214,25 +215,25 @@ class BenchmarkDialog(Dialog):
 
     def report_finished(self, path: str, error: str) -> None:
         if dpg.does_item_exist(self.tag) and hasattr(self, "report_msg"):
-            dpg.set_value(self.report_msg, f"Report written: {path}" if path else f"Report failed: {error}")
+            dpg.set_value(self.report_msg, f"Report saved: {path}" if path else f"Report generation failed: {error}")
 
     # ------------------------------------------------------------------ results tab
     def _build_results(self) -> None:
         with dpg.group(horizontal=True):
             dpg.bind_item_theme(dpg.add_button(label="Refresh", callback=self.refresh_files), "btn_secondary")
-            dpg.bind_item_theme(dpg.add_button(label="Markdown summary", callback=lambda: self.ctl.summary(self.checked())),
+            dpg.bind_item_theme(dpg.add_button(label="Summary (Markdown)", callback=lambda: self.ctl.summary(self.checked())),
                                 "btn_secondary")
             with dpg.tooltip(dpg.last_item()):
-                dpg.add_text("bench/summarize.py: mean ± sd, 95% CI, paired tests, cost of ownership -> .md file")
+                dpg.add_text("bench/summarize.py: mean ± sd, 95% CI, paired tests, cost of ownership (Markdown)")
             dpg.bind_item_theme(dpg.add_button(label="Figures", callback=lambda: self.ctl.figures(self.checked())),
                                 "btn_secondary")
             with dpg.tooltip(dpg.last_item()):
-                dpg.add_text("bench/plot.py: cost vs drift, success, cumulative cost, ablations (SVG)")
+                dpg.add_text("bench/plot.py: cost and success by level, cumulative cost, ablations, lookup steps (SVG)")
             dpg.bind_item_theme(dpg.add_button(label="Open results folder", callback=self.ctl.open_results), "btn_ghost")
         with dpg.group(horizontal=True):
             with dpg.child_window(width=270, height=-1, border=True):
                 st.section_label("Result files")
-                st.font(dpg.add_text("Tick one or more; rows are combined.", color=MUTED, wrap=240), "small")
+                st.font(dpg.add_text("Select one or more files; their rows are combined.", color=MUTED, wrap=240), "small")
                 self.files_parent = dpg.add_group()
             with dpg.child_window(width=-1, height=-1, border=True) as right:
                 self.results_parent = right
@@ -254,7 +255,7 @@ class BenchmarkDialog(Dialog):
             self.file_boxes[p.name] = dpg.add_checkbox(label=p.name, default_value=p.name in before,
                                                        parent=self.files_parent, callback=self.show_results)
         if not files:
-            dpg.add_text("No result CSV yet.", color=MUTED, parent=self.files_parent)
+            dpg.add_text("No result files.", color=MUTED, parent=self.files_parent)
         self.show_results()
 
     def show_results(self, *_) -> None:
@@ -264,21 +265,20 @@ class BenchmarkDialog(Dialog):
         p = self.results_parent
         rows = br.read_rows(self.checked())
         if not rows:
-            dpg.add_text("Tick a result file on the left, or start a run in the Run tab.", color=MUTED, parent=p)
+            dpg.add_text("Select a result file, or start a run from Configuration.", color=MUTED, parent=p)
             return
         s = br.summarize(rows)
         unit = s["unit"]
         st.font(dpg.add_text(f"{len(rows)} runs  ·  {len(s['tasks'])} task(s)  ·  models: {', '.join(s['models'])}"
                              f"  ·  cost unit: {unit}", parent=p), "semibold")
-        st.font(dpg.add_text("Rerun = the run after the site changed (plan from the first run restored). "
-                             "'x Ecogent' = mean rerun cost compared with Ecogent's. Rerun2 = the run after that: "
-                             "0 calls means the repair was saved.", color=MUTED, wrap=740, parent=p), "small")
+        st.font(dpg.add_text("Rerun: execution after the site change, with the plan from the cold run restored. "
+                             "Cost ratio: mean rerun cost relative to Ecogent. Repairs persisted: second reruns with zero LLM calls.", color=MUTED, wrap=740, parent=p), "small")
         dpg.add_spacer(height=4, parent=p)
-        st.section_label("By system", parent=p)
+        st.section_label("Summary by system", parent=p)
         with dpg.table(parent=p, header_row=True, policy=dpg.mvTable_SizingFixedFit, borders_innerH=True,
                        row_background=True, scrollX=True, height=_table_h(len(s["overview"]))):
-            for c in ("System", "Passed", "LLM calls", "Total cost", "Cold run", "Mean rerun", "x Ecogent",
-                      "Calls / rerun", "s / rerun", "Rerun2 at 0 calls", "Timeouts"):
+            for c in ("System", "Success", "LLM calls", "Total cost", "Cold-run cost", "Mean rerun cost", "Cost ratio",
+                      "LLM calls / rerun", "Time / rerun (s)", "Repairs persisted", "Timeouts"):
                 dpg.add_table_column(label=c)
             for o in s["overview"]:
                 with dpg.table_row():
@@ -296,7 +296,7 @@ class BenchmarkDialog(Dialog):
                     dpg.add_text(f"{z} / {n}" if n else "-")
                     dpg.add_text(str(o["timeouts"]), color=DANGER if o["timeouts"] else MUTED)
         dpg.add_spacer(height=6, parent=p)
-        st.section_label("Reruns by drift level  (passed / runs  ·  mean cost  ·  mean calls)", parent=p)
+        st.section_label("Reruns by level  (successes / runs  ·  mean cost  ·  mean LLM calls)", parent=p)
         with dpg.table(parent=p, header_row=True, policy=dpg.mvTable_SizingFixedFit, borders_innerH=True,
                        row_background=True, scrollX=True, height=_table_h(len(s["by_level"]))):
             dpg.add_table_column(label="System")
@@ -314,10 +314,10 @@ class BenchmarkDialog(Dialog):
                         dpg.add_text(f"{c['pass']}/{c['n']}  ·  {br.fmt_cost(c['cost'], unit)}  ·  {c['calls']:.1f}",
                                      color=col)
         dpg.add_spacer(height=6, parent=p)
-        st.section_label(f"Individual runs ({min(len(rows), 300)} of {len(rows)}, newest last)", parent=p)
+        st.section_label(f"Runs ({min(len(rows), 300)} of {len(rows)}, chronological)", parent=p)
         with dpg.table(parent=p, header_row=True, policy=dpg.mvTable_SizingFixedFit, borders_innerH=True,
                        row_background=True, scrollX=True, scrollY=True, height=320):
-            for c in ("Task", "System", "Seed", "Level", "Phase", "Status", "Pass", "Oracle", "Calls", "Cost", "Seconds"):
+            for c in ("Task", "System", "Seed", "Level", "Phase", "Status", "Success", "Oracle verdict", "LLM calls", "Cost", "Time (s)"):
                 dpg.add_table_column(label=c)
             for r in rows[-300:]:
                 with dpg.table_row():
@@ -333,21 +333,22 @@ class BenchmarkDialog(Dialog):
     # ------------------------------------------------------------------ run tab
     def _run_buttons(self) -> None:
         with dpg.group(horizontal=True):
-            self.run_btn = dpg.add_button(label="Run now", width=130, callback=self._run_now)
+            self.run_btn = dpg.add_button(label="Start", width=130, callback=self._run_now)
             dpg.bind_item_theme(self.run_btn, "btn_primary")
             self.stop_btn = dpg.add_button(label="Stop", width=90, callback=lambda: self.ctl.stop())
             dpg.bind_item_theme(self.stop_btn, "btn_danger")
-            dpg.bind_item_theme(dpg.add_button(label="Save settings", callback=self._save), "btn_secondary")
+            dpg.bind_item_theme(dpg.add_button(label="Save configuration", callback=self._save), "btn_secondary")
             dpg.add_spacer(width=20)
-            st.font(dpg.add_text("Free checks:", color=MUTED), "small")
-            helps = {"Lab self-test": "lab sites, drift and oracles (no browser)",
-                     "Fake-LLM benchmark run": "the whole drift_bench pipeline with a scripted fake LLM",
-                     "Shop task self-test": "test-shop oracles: right answers pass, empty and stale answers fail (starts the shop)"}
+            st.font(dpg.add_text("Validation:", color=MUTED), "small")
+            helps = {"Lab integrity test": "Lab sites, drift invariants and oracles (no browser).",
+                     "Pipeline test (mock LLM)": "The complete drift_bench pipeline with a scripted mock LLM.",
+                     "Shop oracle test": "Shop oracles: correct answers pass; empty and stale answers fail (starts the shop server).",
+                     "Lab visual invariance test": "Lab level 1 (markup-only change) renders pixel-identical to level 0."}
             for label, help_text in helps.items():
                 b = dpg.add_button(label=label, user_data=label, callback=lambda s, a, u: self._free(u))
                 dpg.bind_item_theme(b, "btn_secondary")
                 with dpg.tooltip(b):
-                    dpg.add_text("No API cost: " + help_text)
+                    dpg.add_text("No API cost. " + help_text)
         self.msg = dpg.add_text("", color=WARN)
 
     def _free(self, label: str) -> None:
@@ -368,11 +369,11 @@ class BenchmarkDialog(Dialog):
         with dpg.child_window(height=-1, border=False):
             dpg.bind_item_theme(dpg.last_item(), "flat")
             with dpg.group(horizontal=True):
-                st.section_label("Site")
+                st.section_label("Environment")
                 self.site = dpg.add_radio_button(["lab", "shop"], default_value=c.get("site", "lab"), horizontal=True,
                                                  callback=self._site_changed)
-                st.font(dpg.add_text("lab = bench/lab sites, levels 0-4 cumulative  ·  shop = test shop (held-out), "
-                                     "levels 0-9, one real-world change each", color=MUTED), "small")
+                st.font(dpg.add_text("lab: bench/lab sites, levels 0-4 (cumulative)  ·  shop: test shop (held-out), "
+                                     "levels 0-9 (one change type each)", color=MUTED), "small")
             with dpg.group(horizontal=True):
                 st.section_label("Tasks")
                 dpg.add_button(label="All", small=True, callback=lambda: self._set_all(self.task_boxes, True))
@@ -402,20 +403,20 @@ class BenchmarkDialog(Dialog):
                 self.out_name = dpg.add_input_text(label="Result name", default_value=c["out_name"], width=150,
                                                    callback=self.update_state)
             with dpg.group(horizontal=True, horizontal_spacing=18):
-                self.prices = dpg.add_input_text(label="Prices", default_value=c["prices"], width=380,
+                self.prices = dpg.add_input_text(label="Pricing", default_value=c["prices"], width=380,
                                                  callback=self.update_state,
                                                  hint="MODEL=IN,OUT,CACHED per 1M tokens; several: separate with ;")
-                self.max_steps = dpg.add_input_int(label="Max steps (external)", default_value=int(c["max_steps"]),
+                self.max_steps = dpg.add_input_int(label="Step limit (external agents)", default_value=int(c["max_steps"]),
                                                    width=90, callback=self.update_state)
-                self.timeout = dpg.add_input_int(label="Timeout s (external)", default_value=int(c["timeout"]),
+                self.timeout = dpg.add_input_int(label="Timeout, s (external agents)", default_value=int(c["timeout"]),
                                                  width=90, callback=self.update_state)
             with dpg.group(horizontal=True, horizontal_spacing=18):
-                self.price_date = dpg.add_input_text(label="Price date (when you read the prices)", hint="YYYY-MM-DD",
+                self.price_date = dpg.add_input_text(label="Pricing date", hint="YYYY-MM-DD",
                                                      default_value=c.get("price_date", ""), width=120, callback=self.update_state)
             with dpg.group(horizontal=True, horizontal_spacing=18):
-                self.headless = dpg.add_checkbox(label="Headless (hide the browser)", default_value=bool(c["headless"]),
+                self.headless = dpg.add_checkbox(label="Headless browser", default_value=bool(c["headless"]),
                                                  callback=self.update_state)
-                self.no_rerun2 = dpg.add_checkbox(label="Skip rerun2", default_value=bool(c["no_rerun2"]),
+                self.no_rerun2 = dpg.add_checkbox(label="Skip second rerun", default_value=bool(c["no_rerun2"]),
                                                   callback=self.update_state)
             self.plan_text = dpg.add_text("", color=MUTED, wrap=1000)
             self.cmd_text = dpg.add_input_text(default_value="", readonly=True, width=-1)
@@ -475,10 +476,10 @@ class BenchmarkDialog(Dialog):
         running = self.ctl.running()
         dpg.configure_item(self.run_btn, enabled=not running and not errs)
         dpg.configure_item(self.stop_btn, enabled=running)
-        state = (f"Running: {self.ctl.label()}  (since {self.ctl.started()})  -  live output in the Output tab"
+        state = (f"Running: {self.ctl.label()}  (since {self.ctl.started()})  -  see Log"
                  if running else f"Idle.  Schedule: {br.describe_schedule(self.cfg)}")
         dpg.set_value(self.state_text, state)
-        dpg.set_value(self.state_text2, state.split("  -  live")[0])
+        dpg.set_value(self.state_text2, state.split("  -  see Log")[0])
         dpg.configure_item(self.state_text, color=st.PRIMARY_HOVER if running else MUTED)
         if hasattr(self, "sched_info"):
             self._update_schedule_info()
@@ -501,11 +502,11 @@ class BenchmarkDialog(Dialog):
             return
         cells, runs = br.count_runs(c)
         ext = [v for v in c["variants"] if v in br.EXTERNAL]
-        msg = (f"Start the benchmark now?\n\n{runs} runs in {cells} cells with your main model from Settings. "
-               f"This calls the paid API.\n"
-               + ("A browser window opens for every cell; leave it alone while it runs.\n" if not c["headless"] else "")
+        msg = (f"Start the benchmark?\n\n{runs} runs in {cells} cells with your main model from Settings. "
+               f"This uses the paid API.\n"
+               + ("A browser window opens for each cell; do not interact with it.\n" if not c["headless"] else "")
                + (f"External agents: {', '.join(ext)} (their installs must be ready).\n" if ext else "")
-               + "Ecogent tasks in the app should not run at the same time.")
+               + "Do not run Ecogent tasks in the app at the same time.")
 
         def go(yes: bool) -> None:
             if yes:
@@ -520,9 +521,8 @@ class BenchmarkDialog(Dialog):
     # ------------------------------------------------------------------ schedule tab
     def _build_schedule(self) -> None:
         s = self.cfg["schedule"]
-        st.font(dpg.add_text("When should the automatic benchmark run? It uses the tasks and systems saved in the "
-                             "Run tab. The app must be open at that time; a run that is due while Ecogent is busy "
-                             "starts when it is free.", color=MUTED, wrap=1000), "small")
+        st.font(dpg.add_text("Automatic runs use the saved configuration. The application must be open at the scheduled time; "
+                             "a run that falls due while a task is running is deferred until it finishes.", color=MUTED, wrap=1000), "small")
         dpg.add_spacer(height=6)
         self.mode = dpg.add_radio_button(br.SCHEDULE_MODES, default_value=s.get("mode", "off"), horizontal=True,
                                          callback=self.update_state)
@@ -533,13 +533,13 @@ class BenchmarkDialog(Dialog):
                                            callback=self.update_state)
             self.weekday = dpg.add_combo(br.WEEKDAYS, label="Day (weekly)", default_value=s.get("weekday", "Sun"),
                                          width=80, callback=self.update_state)
-        self.idle = dpg.add_checkbox(label="Wait while Ecogent is busy with a task", default_value=s.get("only_when_idle", True))
+        self.idle = dpg.add_checkbox(label="Defer while a task is running", default_value=s.get("only_when_idle", True))
         with dpg.group(horizontal=True):
             dpg.bind_item_theme(dpg.add_button(label="Save schedule", width=150, callback=self._save), "btn_primary")
         dpg.add_spacer(height=6)
         self.sched_info = dpg.add_text("", wrap=1000)
-        st.font(dpg.add_text("Scheduled runs are real, paid runs with a visible browser unless Headless is ticked. "
-                             "Lab sites have no captchas, so no one needs to be at the computer.",
+        st.font(dpg.add_text("Scheduled runs use the paid API and a visible browser unless Headless browser is selected. "
+                             "The lab sites have no CAPTCHAs, so no supervision is required.",
                              color=MUTED, wrap=1000), "small")
 
     def _update_schedule_info(self) -> None:
