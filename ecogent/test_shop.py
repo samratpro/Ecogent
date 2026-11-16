@@ -1,7 +1,7 @@
 """
 The test shop (test_shop/, React + Node) as seen from the app: install / build / start / stop the server
 on port 3010, read and change the site version through its key-protected lab API.
-No GUI code here; the Benchmark window's "Test shop" tab uses it.
+No GUI code here; the Test Lab window (gui/testlab.py) and the shop benchmark use it.
 """
 
 from __future__ import annotations

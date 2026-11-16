@@ -8,7 +8,7 @@ Here is detail explain how Ecogent works:-
 - json files
 - VectorDB(ChoromaDB)
 - NOSQL DB (JSON)
-- Tiny Local LLM
+- Tiny Local LLM - replaced by cloud tiny llm when tiny task comes
 - browser manage - https://github.com/samratpro/playwright_browser_manager
 -  DearPyGui  for GUI
 

@@ -252,6 +252,17 @@ class BrowserSession:
         except Exception:
             return False
 
+    def field_values(self) -> str:
+        """Current values of the page's text fields (typed text is not part of the page text or the HTML)."""
+        try:
+            vals = self.page.evaluate(
+                """() => Array.from(document.querySelectorAll('input, textarea, select'))
+                    .filter(e => !['hidden', 'password'].includes((e.type || '').toLowerCase()))
+                    .map(e => e.value || '').filter(Boolean)""")
+            return " ".join(str(v) for v in vals) if isinstance(vals, list) else ""
+        except Exception:
+            return ""
+
     def visible_many(self, selectors: list[str]) -> list[bool]:
         """Real visibility of many CSS selectors in ONE browser round trip: catches what the HTML
         alone cannot show (CSS classes, hidden parents, closed menus). Same rule as Playwright's

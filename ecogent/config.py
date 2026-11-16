@@ -61,7 +61,7 @@ class LLMConfig:
     api_key: str = ""
     model: str = "gpt-4o-mini"
     max_tokens: int = 4096
-    temperature: float = 0.1
+    temperature: float = 0.0          # 0 = deterministic decoding (required for paper runs)
     timeout: int = 120
 
     @property

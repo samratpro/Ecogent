@@ -1,79 +1,98 @@
-# Pending — where the work stopped (2026-11-13)
+# Pending — where the work stopped (2026-11-16)
 
 > To continue with Claude: open the repo and say "read pending.md and continue".
-> Older notes (rules, what was built, open decisions): `Ecogent_Works_Doc/pending.md`.
+> **Base idea: `Ecogent_Works_Doc/how_work.md`** (the original design: task types, plan.json / current_task.json,
+> element-finding ladder, validation elements, self-healing, the scraping pattern). Everything here builds on it.
+> How everything is built: `Ecogent_Works_Doc/manual.md`. Automatic vs manual benchmark work:
+> `Ecogent_Works_Doc/benchmark_auto_vs_manual.md`.
 
 ---
 
-## 1. Not committed yet (code changed today)
+## 1. Done since 2026-11-13
 
-| File | Change | Why |
+- Test shop "Northwind Market" (`test_shop/`, port 3010) + Test Lab window; 9 held-out shop tasks, levels 0-9.
+- Paper mode (Benchmark → Experiment): presets, reproducibility checklist, meta file, paper report.
+- Validation tests (all pass): Lab integrity, Pipeline (mock LLM, lab + shop), Lab / Shop visual invariance,
+  Shop oracle, Shop task-completion, Model routing (`bench/routing_check.py`).
+- Baselines checked with a real model (gpt-4o-mini): Stagehand and browser-use failures are the agents' own
+  (made-up results, parallel clicks; going back to the empty search page). Runner records cost on timeouts,
+  `agent.log`, Stagehand cache counts. browser-use vision-off variant added.
+- Settings: temperature 0; searchable model list; show / hide API key.
+- Models now: main `openai/gpt-4.1`, cheap `gpt-4o-mini` (OpenRouter). Routing verified on real tasks.
+- **Bug fixed (important for the paper):** a step check with a template (`{{user.full_name}}`) was never filled
+  in, and typed field values did not count, so every automation rerun "failed" the check and paid for a heal.
+  `jobs_python` rerun on an unchanged site: 14 calls / failed → **0 calls / passed**. Regression test added to
+  the pipeline test (it fails on the old code, passes on the new).
+- All checks pass on the current code (2026-11-16): end-to-end test (mock LLM) `ALL OK`, pipeline test (mock LLM)
+  `lab pipeline OK` / `shop pipeline OK` / `FAKE RUN OK`, model routing `ROUTING OK` (with real calls).
+- `Ecogent_Works_Doc/manual.md` written (structure, task flow, element ladder, model routing, benchmark).
+
+## 2. Not committed yet
+
+This session's code (fix above, routing check, settings window, shop pilot preset, docs). Commit + tag before any
+paper run; then re-run the validation tests at that commit (the checklist only accepts the current commit).
+
+## 3. Real results so far (gpt-4.1 + gpt-4o-mini, seed 1, 2026-11-16, scratch only)
+
+| Task | Cold run | Rerun, no change | Rerun, level 3 | Second rerun, level 3 |
+|---|---|---|---|---|
+| `papers_caching` (analysis) | pass, 3 calls, $0.009 | pass, 0 calls | pass, 1 call | pass, 0 calls |
+| `jobs_python` (automation) | 3/4 jobs, 34 calls, $0.040 | pass, 0 calls | 3/4, 19 calls | pass, 0 calls |
+
+Not paper data (scratch folder, uncommitted code, 1 seed).
+
+## 4. Ready for a paper? (assessment 2026-11-16)
+
+**Not yet.** The system and the benchmark tooling are nearly ready; the paper needs **results**, which do not exist yet.
+
+| Part | Status | Enough for a paper? |
 |---|---|---|
-| `ecogent/browser.py` (`_new_manager`) | profile folder passed to the browser manager as an **absolute** path | A relative `--user-data-dir` made Brave fall back to your normal profile: benchmark pages opened as tabs in your own Brave, the debug port never opened (`ECONNREFUSED 127.0.0.1:9231`), every run failed. Checked: a separate Brave window now opens. |
-| `bench/drift_bench.py` (`main`) | `--work` folder made absolute | Same bug from the benchmark side. |
+| Ecogent (the agent) | built, tested, reuse verified with real models | ✅ mostly; first runs on automation are still weak |
+| Benchmark tooling (lab, test shop, oracles, runner, Paper mode, validation tests) | built and checked | ✅ yes |
+| Baselines | Stagehand + browser-use run; both fail with gpt-4o-mini | ⚠️ need a model where they succeed, plus at least one cost-focused competitor (Stagehand with a working cache, or workflow-use) |
+| **Experimental results** | 2 tasks, 1 seed, scratch only | ❌ **nothing usable yet** |
+| Statistics (5 seeds, confidence intervals, paired tests, break-even) | code ready, no data | ❌ |
+| Ablations (what each part contributes) | code ready, no data | ❌ |
+| Second model family | not started | ❌ (reviewers usually ask) |
+| Real-world study / public benchmark | not started | ⚠️ needed against "self-built benchmark" criticism |
+| Paper text | not started | ❌ |
 
-The free fake-LLM checks (`fake_run`, `e2e_fake_llm.py`) were **not** re-run after this change (stopped on request).
-Commit before the next benchmark session (the manifest records the git commit).
+Minimum for a credible submission:
+1. Commit + tag, pre-registration, validation tests passed at that commit.
+2. Shop pilot; fix anything it reveals **before** freezing the code.
+3. Main comparison (lab + shop, 5 seeds); external baselines may run on fewer levels to fit the budget.
+4. At least one cost-focused competitor that actually works.
+5. Ablations (ladder rungs, `no_repair`, `no_cheap`).
+6. One more model family, even on a subset.
+7. The paper: method, results, where Ecogent does not save, threats to validity, AI-use disclosure.
 
-## 2. First head-to-head result (real LLM)
+Optional, raises acceptance a lot: real-world study (32 cases), manual agents, AWM-style baseline.
 
-Task `papers_caching`, gpt-4o-mini via OpenRouter, price $0.15 / $0.60 / $0.075 per 1M (in / out / cached),
-drift levels 0–4, seed 1, temperature **0.1** (not 0). Visible browser.
+Rough cost of the full main runs with gpt-4.1: about $300-650 and 1-2 weeks of running (the external baselines
+are ~80% of it); the pilot gives the exact numbers.
 
-| | Ecogent | Stagehand | browser-use |
-|---|---|---|---|
-| Runs passing the oracle | **11 / 11** | 0 / 11 | 0 / 2 (both timed out at 420 s, then stopped) |
-| Total LLM calls | **4** | 314 | not recorded |
-| Total cost | **$0.0009** | $0.102 | unknown |
-| Seconds per rerun | ~5 | 46–283 | >420 |
-| Second rerun after drift | 0 calls at every level | 4–31 calls | — |
+## 4b. Gaps (code side: Claude; research side: you)
 
-Ecogent detail: L0 cold 3 calls (plan, pick, analyze); L2 rerun 1 call (`analyze`, page text changed);
-L3 / L4 reruns 0 calls — 1 broken element fixed by a **local pick** (no LLM), the report reused from the
-analysis cache. All second reruns 0 calls = repairs written back.
+Code / method:
+- First runs of automation tasks are expensive and can fail (`jobs_python`: 34 calls, 3 of 4 jobs). Check the
+  pilot results for the same pattern on other tasks before freezing the code.
+- Contribution (c), per-task-type reuse policies, has no experiment that isolates it.
+- Method details to state in the paper: vector memory off in the benchmark, scraping sample auto-accepted.
 
-Files: `bench/results/h2h.csv` (Ecogent + browser-use timeouts), `bench/results/h2h_stagehand.csv`,
-`bench/results/work/` (per-run folders). `bench/results/` is git-ignored — back it up.
+Research (yours):
+- Pre-registration (`bench/preregistration.md`), prices + price date in Benchmark → Configuration.
+- Shop pilot (Experiment → "Pilot study: test shop"), then 5-seed lab + shop runs, ablations.
+- Second model family; manual agents; real-world study; AWM-style baseline decision.
+- `how_work.md` still lists the tiny local LLM; `google_research.md` has unverified citations (#10, #13).
+- Paper: venue, IEEEtran draft, verified `.bib`, threats to validity, IEEE AI-use disclosure.
 
-**This is one small task (12 steps, 3 element lookups), one seed: a first sign, not a paper result.**
+## 5. Final repo cleanup (you, after the experiments)
 
-## 3. Next steps (proposed — your decision)
+Plan: keep only the code, replace the working notes with formal docs. Do it **after** the paper runs, on a new
+commit, because every result's manifest points to the commit it ran on (keep that tag).
 
-1. **Check Stagehand's 0/11 is a fair failure** (free): read its output files in
-   `bench/results/work/stagehand/papers_caching/s1r1/`. A baseline that never succeeds will be questioned;
-   rule out a runner problem (e.g. how the final report is collected).
-2. **Debug browser-use** (a few cents): run one cell with its log visible — `run_browser_use.py` output is
-   currently discarded, so the cause of the 420 s timeouts is unknown. Candidates: vision ON (screenshots with
-   gpt-4o-mini), timeout too short. Decide: add a vision-off variant?
-3. Set **temperature 0** for both models, commit, then the **pilot** (4 tasks × 2 seeds) from
-   `Ecogent_Works_Doc/benchmark_manual_testing.md` §2 — with `browser_use` and `stagehand` included.
-4. Library note: `playwright_browser_manager` prints `✅`, which crashes on Windows when output goes to a file
-   or pipe (cp1252). Run scripts with `PYTHONIOENCODING=utf-8` (used today), or fix it in the library.
+| Keep (code + paper artifact) | Remove or replace | Careful |
+|---|---|---|
+| `ecogent/`, `bench/` (minus `results/`), `test_shop/`, `README.md`, `pyproject.toml`, `requirements.txt`, `.gitignore` | `pending.md`, `Ecogent_Works_Doc/` working notes, `research/` drafts → formal docs (e.g. `docs/`: design from `how_work.md` (the base idea; update it first: no tiny local LLM, software test = future work), architecture from `manual.md`, benchmark guide, test shop) | `.claude/skills/ecogent/` holds tests: `scripts/e2e_fake_llm.py`, `gui_smoke.py`, `gui_flow.py` and their test pages `site/`. Move them to `tests/` before deleting `.claude/`, or the end-to-end test is lost |
 
-## 4. Gaps before writing the IEEE paper (from today's review)
-
-- No full benchmark data yet: pilot, full run, ablations, manual agents (Claude in Chrome / Perplexity /
-  Antigravity), real-world study (4 weekly rounds — start round 1 early, it fixes the earliest submission date).
-- Research statement (`Ecogent_Works_Doc/how_work.md` line 26) vs benchmark: **AWM-style baseline** not built;
-  contribution (c) per-task-type reuse policies has **no experiment** isolating it; vector memory off,
-  scraping sample auto-accepted, ablation switches in core — must be stated in the method; `how_work.md` still
-  lists the tiny local LLM; N ≥ 5 per cell (`ecogent_vs_others.md` §9) vs 3 seeds in the run plan.
-- Open decisions in `Ecogent_Works_Doc/pending.md` §4 still open.
-- Reviewer risks: self-built benchmark (argue drift realism), `self_healing_test_site_plan.md` not built (level 1
-  renames classes without CSS → pages look different, may be unfair to vision agents), one model family,
-  prompt tuning on the test set (freeze prompts + record commit).
-- Paper: venue + deadline + page limit + double-blind not chosen; no IEEEtran draft; new verified `.bib`
-  (Agentic Compilation, Agentic Plan Caching, AgentRR, Stagehand, workflow-use, Similo, AutoCrawler, AWM);
-  ladder pseudocode, cost model, threats to validity; release code + lab + CSVs; robots.txt / terms check for
-  the 32 real cases; IEEE AI-text disclosure.
-
-## 5. Commands used today
-
-```bash
-PYTHONIOENCODING=utf-8 .venv/Scripts/python bench/drift_bench.py --tasks papers_caching --variants ecogent \
-    --levels 0,1,2,3,4 --seeds 1 --price gpt-4o-mini=0.15,0.60,0.075 --out bench/results/h2h.csv \
-    --max-steps 30 --timeout 420
-PYTHONIOENCODING=utf-8 .venv/Scripts/python bench/drift_bench.py --tasks papers_caching --variants stagehand \
-    --levels 0,1,2,3,4 --seeds 1 --price gpt-4o-mini=0.15,0.60,0.075 --out bench/results/h2h_stagehand.csv \
-    --max-steps 30 --timeout 420
-```
+Ask Claude to do the move (tests → `tests/`, update paths in code and docs) when you are ready.

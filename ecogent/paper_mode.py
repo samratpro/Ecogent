@@ -48,6 +48,13 @@ PRESETS = {
               "tasks": ["shop_baby_under_30", "papers_caching", "jobs_python", "crm_add_deal"],
               "variants": ["ecogent", "nocache", "compile_only", "stagehand", "browser_use"], "levels": "0,1,2,3,4", "seeds": "1,2",
               "about": "4 tasks x 2 seeds: estimates run time and cost and verifies that every system runs."},
+    "pilot_shop": {"title": "Pilot study: test shop (exploratory)", "paper": False, "site": "shop",
+                   "tasks": ["nw_books_under_20", "nw_kitchen_price_range", "nw_cart_setup"],
+                   "variants": ["ecogent", "nocache", "compile_only", "no_cheap", "stagehand", "browser_use"],
+                   "levels": "0,2,5,6,8", "seeds": "1",
+                   "about": "One scraping, analysis and automation task x baseline, markup refactor, redesign, copy change "
+                            "and data change x 1 seed: checks task difficulty (no floor / ceiling) and that every system "
+                            "runs. Not reported as results; do not change Ecogent after seeing it (the shop is held out)."},
 }
 
 # Free checks a paper run needs, per site (label -> how its success is recognised in the output)
@@ -184,6 +191,11 @@ def readiness(settings: Settings, cfg: dict, paper: bool = True) -> list[Check]:
                      "Use a new result name so that runs from different code versions are never mixed."))
     tasks_all = br.task_names(cfg.get("site", "lab"))
     sel = [t for t in cfg.get("tasks") or [] if t in tasks_all]
+    same = settings.cheap_llm.enabled and settings.cheap_llm.model == settings.main_llm.model
+    out.append(Check("Distinct main and cheap models", not same,
+                     f"main {settings.main_llm.model}" + (f", cheap {settings.cheap_llm.model}" if settings.cheap_llm.enabled else ", no cheap model"),
+                     "With the same model for both, routing saves nothing and no_cheap equals ecogent. Use a stronger "
+                     "main model, or disable the cheap model and report that.", required=False))
     out.append(Check("Complete task suite", len(sel) == len(tasks_all), f"{len(sel)} of {len(tasks_all)} tasks",
                      "A subset must be justified in the paper.", required=False))
     if not paper:

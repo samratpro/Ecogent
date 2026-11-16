@@ -6,8 +6,8 @@ on **port 3010**. It has no connection to Ecogent's code. Any agent, scripted or
 
 ## Run it
 
-- **From Ecogent:** sidebar → **Benchmark** → **Test shop** → **Start**. The first start installs packages and builds,
-  which takes about a minute. The same tab switches the site version.
+- **From Ecogent:** sidebar → **Test Lab** → **Start server**. The first start installs packages and builds,
+  which takes about a minute. The same window switches the site version (Scenarios).
 - **By hand:** `npm install`, `npm run build`, `node server.js --port 3010`, then open http://localhost:3010.
 
 Needs Node 18+.
@@ -65,9 +65,12 @@ Markup 1–3 change the code **and** the CSS together, so the page looks identic
 python test_shop/check_look.py     # markup 1-3: identical pixels and words, new class names   -> LOOK OK
 python test_shop/check_flows.py    # a scripted user completes a purchase in 18 versions        -> FLOWS OK
 ```
-Both also run from the app (Benchmark → Test shop).
+Both also run from the app (Test Lab → Validation and tools).
 
-## Not done yet
+## Benchmark on this shop
 
-Benchmark tasks + oracles on this shop (in `bench/lab/tasks.py` style), and `drift_bench.py` support for setting the
-shop version per level. See `Ecogent_Works_Doc/self_healing_test_site_plan.md`.
+`bench/shop_tasks.py`: 9 held-out tasks with oracles that read the ground truth at scoring time, and benchmark levels
+0-9 (one change type each). Run with `python bench/drift_bench.py --site shop ...` or Benchmark → Configuration →
+Environment: test shop. `python -m bench.shop_selftest` checks the oracles (SHOP TASKS OK), and the pipeline test
+(mock LLM) `python -m bench.lab.fake_run <dir>` runs one shop task end to end. See
+`Ecogent_Works_Doc/self_healing_test_site_plan.md`.

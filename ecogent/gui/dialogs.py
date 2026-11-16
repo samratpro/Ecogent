@@ -364,28 +364,88 @@ class SettingsDialog(Dialog):
                                       width=260, callback=on_provider)
         hint = dpg.add_text(self.PROVIDER_HINTS.get(current, ""), color=MUTED)
         w["base_url"] = dpg.add_input_text(label="Base URL", default_value=cfg.base_url, width=520)
-        w["api_key"] = dpg.add_input_text(label="API key", default_value=cfg.api_key, password=True, width=520)
+        with dpg.group(horizontal=True):
+            w["api_key"] = dpg.add_input_text(default_value=cfg.api_key, password=True, width=520)
+            eye = st.icon_button("eye", "Show / hide the API key", fallback="Show", height=28)
+
+            def toggle_key(*_):
+                hide = not dpg.get_item_configuration(w["api_key"])["password"]
+                dpg.configure_item(w["api_key"], password=hide)
+                glyph = st.icon("eye" if hide else "eye_off")
+                dpg.configure_item(eye, label=glyph or ("Show" if hide else "Hide"))
+            dpg.set_item_callback(eye, toggle_key)
+            dpg.add_text("API key")
         with dpg.group(horizontal=True):
             w["model"] = dpg.add_input_text(label="Model", default_value=cfg.model, width=300)
-            models = dpg.add_combo([], width=200, no_preview=False, default_value="pick from list",
-                                   callback=lambda s, a: dpg.set_value(w["model"], a))
+            browse = dpg.add_button(label="Browse models...")
+            dpg.bind_item_theme(browse, "btn_secondary")
         with dpg.group(horizontal=True):
-            test_btn = dpg.add_button(label="Test connection / fetch models")
+            test_btn = dpg.add_button(label="Test connection")
             dpg.bind_item_theme(test_btn, "btn_secondary")
             status = dpg.add_text("", color=MUTED)
+        found: list[str] = []
 
-        def test():
+        def fetch() -> bool:
             dpg.set_value(status, "Connecting...")
+            dpg.configure_item(status, color=MUTED)
             try:
-                found = LLMClient(self._llm_from(w)).list_models()
-                dpg.configure_item(models, items=found)
-                dpg.set_value(status, f"Connected - {len(found)} models available")
+                found[:] = LLMClient(self._llm_from(w)).list_models()
+                dpg.set_value(status, f"Connected. {len(found)} models available.")
                 dpg.configure_item(status, color=SUCCESS)
+                return True
             except Exception as e:  # network errors are shown to the user, not raised
                 dpg.set_value(status, f"Failed: {str(e)[:110]}")
                 dpg.configure_item(status, color=DANGER)
+                return False
+
+        def test():
+            fetch()
         dpg.set_item_callback(test_btn, lambda: threading.Thread(target=test, daemon=True).start())
-        w["_test"], w["_status"], w["_models"] = test, status, models
+        # Searchable model list, shown under the Model field (a second modal window over Settings does not show).
+        with dpg.group(show=False) as panel:
+            with dpg.group(horizontal=True):
+                query = dpg.add_input_text(hint="Filter, e.g. gpt-4o, claude, gemini, llama", width=360)
+                info = dpg.add_text("", color=MUTED)
+            box = dpg.add_listbox([], width=520, num_items=8)
+            with dpg.group(horizontal=True):
+                use_btn = dpg.add_button(label="Use selected model")
+                dpg.bind_item_theme(use_btn, "btn_primary")
+                close_btn = dpg.add_button(label="Close list", callback=lambda: dpg.configure_item(panel, show=False))
+                dpg.bind_item_theme(close_btn, "btn_ghost")
+
+        def show_list(*_):
+            q = dpg.get_value(query).strip().lower()
+            items = [m for m in found if all(part in m.lower() for part in q.split())]
+            dpg.configure_item(box, items=items[:400])
+            dpg.set_value(info, f"{len(items)} of {len(found)} models" + (" (first 400 shown)" if len(items) > 400 else ""))
+            dpg.configure_item(info, color=MUTED)
+
+        def use_model(*_):
+            if dpg.get_value(box):
+                dpg.set_value(w["model"], dpg.get_value(box))
+                dpg.configure_item(panel, show=False)
+
+        def load_list():
+            if not found and not fetch():
+                dpg.set_value(info, "Could not load the list. Check provider, base URL and API key, or type the model name.")
+                dpg.configure_item(info, color=DANGER)
+                return
+            show_list()
+
+        def open_list(*_):
+            if dpg.is_item_shown(panel):
+                dpg.configure_item(panel, show=False)
+                return
+            dpg.configure_item(panel, show=True)
+            dpg.set_value(info, "Loading models...")
+            threading.Thread(target=load_list, daemon=True).start()
+        dpg.set_item_callback(query, show_list)
+        dpg.set_item_callback(use_btn, use_model)
+        with dpg.item_handler_registry() as reg:
+            dpg.add_item_double_clicked_handler(callback=use_model)
+        dpg.bind_item_handler_registry(box, reg)
+        dpg.set_item_callback(browse, open_list)
+        w["_test"], w["_status"], w["_browse"] = test, status, browse
 
         w["max_tokens"] = dpg.add_input_int(label="Max output tokens", default_value=cfg.max_tokens, width=160)
         w["temperature"] = dpg.add_input_float(label="Temperature", default_value=cfg.temperature, width=160, step=0.1)

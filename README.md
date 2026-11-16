@@ -51,7 +51,7 @@ Click **Settings**:
   | Custom OpenAI-compatible | any compatible API, e.g. Groq `https://api.groq.com/openai/v1`, Together, DeepSeek | usually required |
   | Anthropic | `https://api.anthropic.com` | required |
 
-  Press **Test connection / fetch models**, then choose a model from the list (or type it).
+  Type the model name, or press **Browse models...** to search the provider's list (the eye button shows or hides the API key).
 - **Cheap model** (optional, recommended) - Ecogent uses two API models: the main (strong) model and a
   cheaper one (e.g. `gpt-4o-mini`, a flash/haiku model) for low-level jobs. Ticked by default: `pick`,
   `validate`, `analyze_map` (per-page notes), `classify`, `repair`. Planning, healing and the final

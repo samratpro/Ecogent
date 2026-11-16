@@ -72,6 +72,11 @@ checklist must be green before **Run experiment** is enabled:
 | `bench/preregistration.md` committed | Hypotheses written before the results, including unfavourable ones |
 | Validation tests passed at this commit (lab integrity, pipeline; for the shop also oracle, visual invariance, task completion) | The measuring tools work on exactly this code |
 | New result file | Rows from different code versions never mix |
+| Distinct main and cheap models (warning only) | With the same model for both, routing saves nothing and `no_cheap` equals `ecogent` |
+
+**Pilot study: test shop** (exploratory, not reported): 3 shop tasks (scraping, analysis, automation) × baseline,
+markup refactor, redesign, copy change, data change × 1 seed, all systems. It checks that the tasks are neither too
+easy nor too hard for every system before the 5-seed runs. Don't change Ecogent after seeing it (the shop is held out).
 
 **Run with deviations** is possible, but the run is then marked as having protocol deviations, and every failed check is listed as a
 deviation in the report. The checklist, environment (OS, Python, Node, settings without API keys) and price date

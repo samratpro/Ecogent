@@ -50,6 +50,7 @@ ICONS = {
     "delete": "\ue74d", "chat": "\ue8bd", "doc": "\ue8a5", "list": "\ue8fd", "bolt": "\ue945",
     "chart": "\ue9d9", "globe": "\ue774", "info": "\ue946", "check": "\ue73e", "panel": "\ue89f",
     "save": "\ue74e", "open": "\ue8a7", "test": "\uebe8", "spark": "\ue734", "user": "\ue77b",
+    "eye": "\ue890", "eye_off": "\ued1a",
 }
 
 FONTS: dict[str, int] = {}

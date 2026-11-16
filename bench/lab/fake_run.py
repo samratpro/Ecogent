@@ -93,7 +93,10 @@ def fake_complete(self, system, messages, max_tokens=None, json_mode=False):
                           {"id": "s5", "action": "for_each", "source": "jobs", "dedupe": True, "steps": [
                               {"id": "a", "action": "open_url", "url": "{{item}}"},
                               {"id": "b", "action": "click", "target": "Apply link"},
-                              {"id": "c", "action": "fill", "target": "Full name input", "value": "{{user.full_name}}"},
+                              # a templated check, as real models write it: must be rendered and must see typed
+                              # field values, else every rerun "fails" it and pays for a heal (regression test)
+                              {"id": "c", "action": "fill", "target": "Full name input", "value": "{{user.full_name}}",
+                               "validation": {"text_contains": "{{user.full_name}}"}},
                               {"id": "d", "action": "fill", "target": "Email input", "value": "{{user.email}}"},
                               {"id": "e", "action": "click", "target": "Submit application button"}]}]})
         raise AssertionError("fake: unknown task prompt")
@@ -112,9 +115,21 @@ def fake_complete(self, system, messages, max_tokens=None, json_mode=False):
         # stale cached page would give a stale answer and fail the oracle.
         names = [p["name"] for p in _shop_truth()["products"] if p["category"] == "home-kitchen"]
         pairs = []
-        for n in sorted(names, key=len, reverse=True):
-            m = re.search(re.escape(n) + r"[^$]{0,200}?\$(\d+\.\d\d)", user)
-            if m and all(n not in q for q, _ in pairs):
+        text, hits = user, []
+        for n in sorted(names, key=len, reverse=True):     # longest first; a matched name is masked out so
+            hit = re.search(re.escape(n), text)             # "French Press 1L" can't match inside "... 1L Lite"
+            if hit:
+                hits.append((n, hit.start(), hit.end()))
+                text = text[:hit.start()] + "#" * len(n) + text[hit.end():]
+        price = r"\$(\d+\.\d\d)\s*(?:\$\d+\.\d\d)?"         # a sale shows "$now $was": the first value counts
+        before = lambda s: re.search(price + r"\s*(?:Sale\s*)?$", text[max(0, s - 40):s])  # noqa: E731
+        # The card's price comes after the name (base markup) or before it (refactored markup). Decide once per page:
+        # if the FIRST product on the page has a price right before it, prices come first.
+        first = min(hits, key=lambda h: h[1]) if hits else None
+        price_first = bool(first and before(first[1]))
+        for n, s, e in hits:
+            m = before(s) if price_first else re.match(r"[^$]{0,200}?" + price, text[e:])
+            if m:
                 pairs.append((n, float(m.group(1))))
         if not pairs:
             return r("# Report\nNo products found.")

@@ -659,14 +659,20 @@ class Executor:
         v = step.get("validation") or {}
         if not v or not self.browser.alive:
             return
-        if v.get("url_contains") and v["url_contains"].lower() not in self.browser.url.lower():
-            raise StepFailed(f"validation: url does not contain '{v['url_contains']}'")
-        if v.get("text_contains"):
-            # Whole page incl. header/nav: a search box value or heading there is a valid match.
+        # Validation values may be templates ({{item}}, {{user.full_name}}, {{var}}): check the rendered value,
+        # never the literal "{{...}}" text (which no page contains, so every rerun would heal again).
+        url_want = str(self.render(v.get("url_contains") or ""))
+        text_want = " ".join(str(self.render(v.get("text_contains") or "")).split())
+        if url_want and url_want.lower() not in self.browser.url.lower():
+            raise StepFailed(f"validation: url does not contain '{url_want}'")
+        if text_want:
+            # Whole page incl. header/nav: a search box value or heading there is a valid match. Typed field
+            # values count too: they are not in the page text, but a fill step's check is often its own value.
             text = " ".join(pr.soup_of(self.browser.html()).get_text(" ").split()).lower()
             title = self.browser.title().lower()
-            if v["text_contains"].lower() not in text and v["text_contains"].lower() not in title:
-                raise StepFailed(f"validation: page does not contain '{v['text_contains']}'")
+            low = text_want.lower()
+            if low not in text and low not in title and low not in " ".join(self.browser.field_values().split()).lower():
+                raise StepFailed(f"validation: page does not contain '{text_want}'")
 
     # ------------------------------------------------------------------ element resolution
     # Attributes that identify an element across page loads (text and value may be live data).
