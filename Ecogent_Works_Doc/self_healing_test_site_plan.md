@@ -1,5 +1,32 @@
 # Plan — Test Site for Self-Healing and Complex Websites
 
+> **Update 2026-11-16: what changed and why**
+> - **Built:** `test_shop/` ("Northwind Market"), a React e-commerce site on port 3010, started from Ecogent
+>   (Benchmark → Test shop). It implements Track S (code changes with the same look) and adds layout, wording,
+>   popup and **data** changes (gap 8: stale answers). Details: `test_shop/README.md`.
+> - **Bias fix:** the first version of this plan designed each change "to break specific rungs" of Ecogent's
+>   ladder (§2–3) and listed hypotheses only about those rungs. Reviewers would read that as a test built around
+>   the authors' system. Now the changes come from **real-world change patterns** (§0), and the ladder analysis is a
+>   **measurement after the run**, not a design input. Hypotheses where Ecogent is expected to do worse were added (§6).
+> - **Not built yet:** shop tasks + oracles, `drift_bench` support for the shop, S6 (URL renames), Track C pages.
+>   See §7.
+
+---
+
+## 0. Fairness rules (apply to every part of this plan)
+
+| # | Rule | How it is enforced |
+|---|---|---|
+| F1 | Every change type comes from a real-world pattern, defined without looking at any agent | Table in `test_shop/README.md` ("Real-world source") |
+| F2 | Some changes must be expected to **hurt** Ecogent | Wording (identity check uses text), full redesign, new names every load, new data (cached answers become wrong) |
+| F3 | One site version for all systems in a run, recorded with the results | Server-wide version, set through the lab API before a run |
+| F4 | No agent can read the answers or change the version | `/__lab` behind a random key, not linked, `robots.txt` disallow |
+| F5 | Every version can be finished by a normal user | `check_flows.py` (role/label selectors only): `FLOWS OK` |
+| F6 | Code-only changes really keep the look | `check_look.py` (pixels + visible words): `LOOK OK` |
+| F7 | Freeze before testing: site **and** Ecogent's prompts get a git tag before the first agent run on the shop; no tuning on its results | Commit recorded in every benchmark manifest |
+| F8 | Hypotheses written down before running, including the unfavourable ones; all results reported | §6 |
+| F9 | Realistic, not adversarial: no honeypots or impossible flows a normal shop would not have | Review of the README table |
+
 > **Goal.** Show, with numbers, how Ecogent finds the same element again when the website's code changes
 > (self-healing), and how it handles hard website features (popups, shadow DOM, iframes, infinite scroll,
 > JavaScript-built pages).
@@ -39,8 +66,9 @@ LLM call every run?*
 | R5 | LLM pick: 15 → 60 candidates → focused outline → full outline | small → large |
 | R6 | Heal / rescue (ReAct turns) | largest |
 
-Each code change below is built to **break specific rungs**. This lets the results show *which rung saved
-the run*. The benchmark CSV already records `cache_hits`, `local_heals`, `local_picks`, `llm_lookups`,
+**The changes are not designed around these rungs** (rule F1). The rung columns in §3 are *predictions* made
+after choosing the real-world changes, used to read the results; the results decide, not the design. The
+benchmark CSV already records `cache_hits`, `local_heals`, `local_picks`, `llm_lookups`,
 `healed` and `rescued`, and the ablations (`no_identity`, `no_alternates`, `no_refind`, `no_obvious`,
 `no_graded`, `no_repair`) switch single rungs off.
 
@@ -64,6 +92,19 @@ Cumulative steps, like the current levels, seeded and reproducible. Every page a
 
 S0–S5 never change the visible text, the data, the form field names, the form actions or the link targets
 (the same rules `selftest.py` checks for the current levels). S6 changes URLs only, with redirects.
+
+**In the test shop (2026-11-16):** `markup 1` = S1; `markup 2` = S2 + S3 + S4 + S5 together (wrappers, tag swaps,
+DOM order, aria-labelledby, half the test ids removed); `markup 3` = S7. S2–S5 are not separate steps yet, so the
+shop cannot say which of them caused a failure. Separating them is possible if you want that detail. S6 is not built.
+
+### Tracks added by the test shop
+
+| Track | Shop setting | Real-world source | Expected effect |
+|---|---|---|---|
+| L: visible redesign | `layout` 1, 2 | Redesigns, A/B tests | Hard for every agent with a saved plan (Ecogent, Stagehand cache); easy for agents that re-read every page |
+| W: wording | `copy` 1 | Copy / localisation updates | Hurts text-based matching, **including Ecogent's identity check** |
+| I: interruptions | `interruptions` 1, 2 | Consent banners, marketing popups | Tests popup handling for every agent |
+| D: data | `content` 1, 2, ... | Prices / stock / products change between visits | Tests **stale answers** (gap 8): a cache that is cheap but wrong |
 
 **Why build it this way:**
 - One change is added per step, so a drop in success points to a single cause.
@@ -133,8 +174,14 @@ which it fails. A clear "fails" row is honest and useful; we keep it in the tabl
 | H5 | `rerun2` ≈ 0 calls: one repair is enough | `rerun2` rows |
 | H6 | S7 (new names per load) costs LLM calls every run, but bounded, and never loops | calls per run, `max_heals_per_run` hits |
 | H7 | `no_refind` hurts most at S3 (tag swap); `no_alternates` hurts most at S1 | ablation figure |
+| H8 | **Unfavourable:** wording changes (`copy 1`) make Ecogent call the LLM more than code-only changes do | calls per run, `llm_lookups` |
+| H9 | **Unfavourable:** a full redesign (`layout 2`) costs Ecogent close to a fresh run | `cost_usd` vs `nocache` |
+| H10 | **Unfavourable:** `markup 3` (new names every load) costs Ecogent LLM calls on every run | calls per run, `rerun2` |
+| H11 | With new data (`content` ≥ 1), Ecogent returns the **new** values, not cached ones (scraping / analysis tasks) | oracle precision vs ground truth of that data version |
+| H12 | Vision / re-reading agents lose little on code-only changes, more on redesigns and popups | success per track, all systems |
 
 If a hypothesis is false, we report it and look at the step that cost (`by_purpose`), not hide it.
+Write the final list down and commit it **before** the first paid run on the shop (rule F8).
 
 ---
 
@@ -154,6 +201,20 @@ If a hypothesis is false, we report it and look at the step that cost (`by_purpo
 
 Phases 1–3 come first: without the look check, "same look" is only a promise.
 
+**Status 2026-11-16** (the test shop took over phases 2, 3 and parts of 4 and 7, for its own pages):
+
+| Phase | Status |
+|---|---|
+| 1 Fix level 1 CSS in `drift.py` (old lab) | not done (the shop does not have this bug) |
+| 2 Track S | done in the shop as `markup` 1–3 (S2–S5 combined in `markup 2`) |
+| 3 Look check | done: `test_shop/check_look.py` → `LOOK OK` (0.0000% pixel difference, same words, ≤4% class names shared) |
+| 3b Flow check (new) | done: `test_shop/check_flows.py` → `FLOWS OK` (purchase + login in 18 version combinations) |
+| 4 S6 / S7 | S7 done (`markup 3`); S6 not built |
+| 5 Track C pages | not built |
+| 6 JS-rendered mode | the shop is a React app, so every page is JavaScript-built |
+| 7 Control | done locally: Ecogent → Benchmark → Test shop (one click); lab page at `/__lab?key=...` |
+| **next** | Shop tasks + oracles (scraping / analysis / automation, using `/__lab/truth` and `/__lab/state`), `drift_bench` sets the shop version per level, pilot |
+
 ---
 
 ## 8. Risks and how we handle them
@@ -162,7 +223,8 @@ Phases 1–3 come first: without the look check, "same look" is only a promise.
 |---|---|
 | The look is "almost" the same (font rendering, sub-pixel shifts) | Fixed browser, fixed window size, fonts bundled; small pixel threshold; fail the build otherwise |
 | `display: contents` changes accessibility trees in some browsers | Note it; the accessibility-tree agents are tested in the manual study, not hidden |
-| We design the changes to suit Ecogent | The changes come from real-site patterns (CSS-module hashes, wrapper components, tag swaps in redesigns); the break check proves each one breaks plain selector replay; hypotheses are written before running |
+| We design the changes to suit Ecogent | Rules F1–F9 (§0): real-world change patterns only, changes that hurt Ecogent included (wording, redesign, per-load names, new data), unfavourable hypotheses H8–H10 written before running, same version for all systems, answers locked away from agents, site and prompts frozen before the first run |
+| We built the shop ourselves (self-built benchmark) | Keep the public benchmark subset (TimeWarp / StressWeb) as a second, independent check; release the shop + git tag so others can re-run it |
 | Public site gets abused or crawled | noindex, robots.txt, nginx rate limit, 64 KB body limit, per-visitor state with expiry (already in `public.py`) |
 | Changing level 1 makes old pilot numbers incomparable | The fix is a new level name / flag; old results keep `level=1` meaning the old behaviour |
 | JS mode results depend on timing | Fixed delays from the seed; report waits separately |
@@ -187,3 +249,5 @@ Phases 1–3 come first: without the look check, "same look" is only a promise.
    Playwright's normal selectors.)
 2. Should S7 be in the main results or only in a "stress" appendix?
 3. Should Track C tasks count in the 24-task total, or be a separate set?
+4. Split the shop's `markup 2` into separate S2–S5 steps (finer cause analysis), or keep it combined?
+5. Which shop tasks (and how many) go into the benchmark, and are they a held-out set (Ecogent never tuned on them)?

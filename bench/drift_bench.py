@@ -65,6 +65,7 @@ FIELDS = ["task", "type", "variant", "seed", "repeat", "level", "level_name", "p
           "cost_usd", "by_purpose", "cache_hits", "local_heals", "local_picks", "llm_lookups", "healed",
           "rescued", "steps_ok", "steps_failed", "steps_skipped", "main_model", "cheap_model", "chat_id", "time"]
 SPECIAL = {"ecogent", "nocache", "compile_only", "no_cheap"}
+LEVEL_NAMES = dict(drift.LEVELS)          # --site shop replaces these with bench.shop_tasks.LEVELS
 EXTERNAL = {"browser_use", "stagehand"}
 BASELINES = ROOT / "bench" / "baselines"
 
@@ -220,7 +221,7 @@ def run_cell(task, variant: str, seed: int, rep: int, levels: list[int], args, b
         verdict = task.oracle(Path(out) if out else None, srv.state)
         stats = (s.plan.get("runs") or [{}])[-1].get("stats", {}) if not fresh or s.plan.get("runs") else {}
         row = {"task": task.name, "type": task.type, "variant": variant, "seed": seed, "repeat": rep, "level": level,
-               "level_name": drift.LEVELS[level], "phase": phase, "status": s.meta.get("status"),
+               "level_name": LEVEL_NAMES[level], "phase": phase, "status": s.meta.get("status"),
                "success": int(verdict["success"]), "precision": verdict["precision"], "recall": verdict["recall"],
                "oracle": verdict["detail"], "seconds": round(time.time() - t0, 1), "calls": d["calls"],
                "input_tokens": d["input_tokens"], "cached_input_tokens": d["cached_input_tokens"],
@@ -362,7 +363,7 @@ def run_external_cell(task, variant: str, seed: int, rep: int, levels: list[int]
         d["by_purpose"] = {"agent": {"calls": d["calls"], "model": model, "in": d["input_tokens"],
                                      "cached": d["cached_input_tokens"], "out": d["output_tokens"]}} if d["calls"] else {}
         row = {"task": task.name, "type": task.type, "variant": variant, "seed": seed, "repeat": rep, "level": level,
-               "level_name": drift.LEVELS[level], "phase": phase, "status": res.get("status", "failed"),
+               "level_name": LEVEL_NAMES[level], "phase": phase, "status": res.get("status", "failed"),
                "success": int(verdict["success"]), "precision": verdict["precision"], "recall": verdict["recall"],
                "oracle": verdict["detail"], "seconds": round(time.time() - t0, 1), **{k: d[k] for k in
                ("calls", "input_tokens", "cached_input_tokens", "output_tokens")},
@@ -401,9 +402,12 @@ def git_commit() -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--site", choices=["lab", "shop"], default="lab",
+                    help="lab: bench/lab sites, drift levels 0-4 (cumulative). shop: the test shop (test_shop/, port "
+                         "3010), levels 0-9 = one real-world change each (bench/shop_tasks.py)")
     ap.add_argument("--tasks", default="all", help="comma separated task names, or 'all': " + ", ".join(BY_NAME))
     ap.add_argument("--variants", default="ecogent,compile_only,nocache")
-    ap.add_argument("--levels", default="0,1,2,3,4")
+    ap.add_argument("--levels", default="", help="default: 0-4 for the lab, 0-9 for the shop")
     ap.add_argument("--seeds", default="1,2,3", help="drift seeds: different site changes of the same size")
     ap.add_argument("--repeats", type=int, default=1,
                     help="independent repeats per seed (same pages, fresh agent): measures LLM randomness")
@@ -417,9 +421,24 @@ def main() -> None:
     ap.add_argument("--verbose", action="store_true", help="print the agent's log")
     ap.add_argument("--max-steps", type=int, default=60, help="step limit for external agents")
     ap.add_argument("--timeout", type=int, default=900, help="seconds per external run")
+    ap.add_argument("--debug-port", type=int, default=0,
+                    help="browser debug port for Ecogent runs (default: Settings); the app's Benchmark window "
+                         "passes its own so a running app browser is never taken over")
+    ap.add_argument("--meta", default="", help="JSON file merged into the manifest (the app's paper-run checklist, "
+                                               "environment, price date)")
     args = ap.parse_args()
 
-    tasks = TASKS if args.tasks == "all" else [BY_NAME[n.strip()] for n in args.tasks.split(",")]
+    global LEVEL_NAMES
+    if args.site == "shop":
+        from bench import shop_tasks
+        all_tasks, by_name, LEVEL_NAMES = shop_tasks.TASKS, shop_tasks.BY_NAME, dict(shop_tasks.LEVELS)
+    else:
+        all_tasks, by_name = TASKS, BY_NAME
+    args.levels = args.levels or ",".join(str(k) for k in LEVEL_NAMES)
+    unknown = [n.strip() for n in args.tasks.split(",") if args.tasks != "all" and n.strip() not in by_name]
+    if unknown:
+        sys.exit(f"unknown task(s) for --site {args.site}: {unknown}")
+    tasks = all_tasks if args.tasks == "all" else [by_name[n.strip()] for n in args.tasks.split(",")]
     variants = [v.strip() for v in args.variants.split(",") if v.strip()]
     levels = [int(x) for x in args.levels.split(",")]
     seeds = [int(x) for x in args.seeds.split(",")]
@@ -427,19 +446,29 @@ def main() -> None:
     base = Settings.load()
     if not base.main_llm.enabled:
         sys.exit("Configure the main LLM in the app's Settings first.")
+    if args.debug_port:
+        base.debug_port = args.debug_port
     for v in variants:
         variant_settings(base, v)           # fail fast on a typo
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    args.work = args.work or str(out.parent / "work")
+    args.work = str(Path(args.work or out.parent / "work").resolve())   # absolute: browser profile dirs
     manifest = {"started": datetime.now(timezone.utc).isoformat(timespec="seconds"), "git_commit": git_commit(),
                 "args": vars(args), "main_model": f"{base.main_llm.provider}:{base.main_llm.model}",
                 "cheap_model": (f"{base.cheap_llm.provider}:{base.cheap_llm.model}" if base.cheap_llm.enabled else ""),
-                "cheap_purposes": base.cheap_purposes, "tasks": [t.name for t in tasks], "levels": drift.LEVELS}
+                "cheap_purposes": base.cheap_purposes, "tasks": [t.name for t in tasks], "site": args.site, "levels": LEVEL_NAMES}
+    if args.meta:
+        manifest["meta"] = json.loads(Path(args.meta).read_text(encoding="utf-8"))
     out.with_suffix(".manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
-    srv = LabServer(port=args.port)
+    if [lv for lv in levels if lv not in LEVEL_NAMES]:
+        sys.exit(f"--levels for --site {args.site} must be in {sorted(LEVEL_NAMES)}")
+    if args.site == "shop":
+        from bench.shop_tasks import ShopTarget
+        srv = ShopTarget()
+    else:
+        srv = LabServer(port=args.port)
     warned: set = set()
     new_file = not out.exists()
     try:

@@ -17,13 +17,18 @@ import os
 import queue
 import subprocess
 import sys
+import threading
 import traceback
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import dearpygui.dearpygui as dpg
 
+from .. import bench_runner as br
+from .. import paper_mode as pm
+from .. import test_shop as ts
 from ..bridge import UIBridge, UIEvent
 from ..config import PROVIDERS, TASK_LABELS, TASK_TYPES, Settings
 from ..scheduler import Scheduler
@@ -31,6 +36,8 @@ from ..storage import ChatSession, open_session, read_json, write_json
 from ..worker import Worker
 from . import dialogs
 from . import style as st
+from .benchmark import BenchControls, BenchmarkDialog
+from .testlab import LabControls, TestLabDialog
 
 JSON_TABS = [("plan", "plan.json", "Plan", True), ("task", "current_task.json", "Current task", True),
              ("steps", "steps.json", "Steps", False), ("memory", "chat.json", "Memory", False)]
@@ -123,6 +130,24 @@ class EcogentApp:
         self._scroll_log = 0
         self._welcome_indent: tuple = ()
         self._welcome_cards: list[int] = []
+        # Benchmark window: drift_bench.py runs as a subprocess; its schedule is checked in the background.
+        self.bench = br.BenchProcess(lambda line: self.events.put(UIEvent("bench_line", payload={"text": line})),
+                                     lambda label, code: self.events.put(UIEvent("bench_done",
+                                                                                 payload={"label": label, "code": code})))
+        self.bench_lines: deque = deque(maxlen=400)
+        self.bench_dialog: Optional[BenchmarkDialog] = None
+        self._bench_postponed = False
+        self.bench_scheduler = br.BenchScheduler(lambda: self.settings,
+                                                 lambda: self.events.put(UIEvent("bench_due")))
+        self.bench_scheduler.start()
+        # Test Lab: the test shop server and its free checks, with their own log.
+        self.shop = ts.ShopServer(lambda line: self.events.put(UIEvent("lab_line", payload={"text": line})),
+                                  lambda state: self.events.put(UIEvent("lab_shop", payload={"state": state})))
+        self.lab_proc = br.BenchProcess(lambda line: self.events.put(UIEvent("lab_line", payload={"text": line})),
+                                        lambda label, code: self.events.put(UIEvent("lab_done", payload={"label": label, "code": code})))
+        self.lab_lines: deque = deque(maxlen=400)
+        self.lab_results: dict = {}
+        self.lab_dialog: Optional[TestLabDialog] = None
 
     # ------------------------------------------------------------------ layout
     def _build(self) -> None:
@@ -168,11 +193,13 @@ class EcogentApp:
             with dpg.group(horizontal=True):
                 st.section_label("Tasks")
                 st.font(dpg.add_text("", tag="task_count", color=st.SUBTLE), "label")
-            dpg.add_child_window(tag="chat_list", height=-(4 * 44 + 18), border=False)
+            dpg.add_child_window(tag="chat_list", height=-(6 * 44 + 18), border=False)
             dpg.bind_item_theme(dpg.last_item(), "list")
             dpg.add_separator()
             for ic, label, cb in (("contact", "Browser profiles", self.open_profiles),
                                   ("clock", "Schedules", self.open_schedules),
+                                  ("test", "Benchmark", self.open_benchmark),
+                                  ("globe", "Test Lab", self.open_testlab),
                                   ("folder", "Output folder", self.open_output),
                                   ("settings", "Settings", self.open_settings)):
                 card, _ = st.rich_button(0, 38, "nav_item", callback=cb)
@@ -321,6 +348,10 @@ class EcogentApp:
                 self._after_frame()
         finally:
             self.scheduler.stop()
+            self.bench_scheduler.stop()
+            self.bench.stop()
+            self.shop.stop()
+            self.lab_proc.stop()
             self.worker.shutdown()
             self.worker.join(timeout=8)
             sys.stdout = sys.__stdout__
@@ -808,6 +839,173 @@ class EcogentApp:
             self.refresh_chats()
         dialogs.SettingsDialog(self.settings, save)
 
+    # ------------------------------------------------------------------ benchmark
+    def open_benchmark(self) -> None:
+        if self.bench_dialog is not None and dpg.does_item_exist(self.bench_dialog.tag):
+            dpg.focus_item(self.bench_dialog.tag)
+            return
+        ctl = BenchControls(start=self.start_benchmark, stop=self.stop_benchmark, free_check=self.bench_free_check,
+                            summary=self.bench_summary, figures=self.bench_figures,
+                            open_results=lambda: (br.RESULTS.mkdir(parents=True, exist_ok=True), open_path(br.RESULTS)),
+                            running=lambda: self.bench.running, label=lambda: self.bench.label,
+                            started=lambda: self.bench.started, lines=lambda: list(self.bench_lines),
+                            open_file=open_path,
+                            report_done=lambda path, err: self.events.put(UIEvent("bench_report", payload={"path": path, "error": err})))
+        self.bench_dialog = BenchmarkDialog(self.settings, ctl)
+
+    def _bench_dialog_alive(self) -> Optional[BenchmarkDialog]:
+        d = self.bench_dialog
+        return d if d is not None and dpg.does_item_exist(d.tag) else None
+
+    def _bench_start(self, label: str, cmd: list[str]) -> bool:
+        try:
+            self.bench.start(label, cmd)
+        except (RuntimeError, OSError) as e:
+            self.log(f"Benchmark: cannot start '{label}': {e}")
+            return False
+        self.bench_lines.append(f"===== {label}  ({datetime.now():%Y-%m-%d %H:%M:%S}) =====")
+        self.log(f"Benchmark started: {label}")
+        d = self._bench_dialog_alive()
+        if d:
+            d.append("")
+            d.update_state()
+        return True
+
+    def start_benchmark(self, cfg: dict, scheduled: bool = False) -> None:
+        if scheduled:                   # this due time is used up even if the run cannot start (no retry spam)
+            br.mark_started(self.settings, cfg)
+        errs = br.validate(cfg)
+        llm = self.settings.main_llm
+        if PROVIDERS.get(llm.provider, {}).get("needs_key") and not llm.api_key:
+            errs.append("set the main LLM in Settings first.")
+        if errs:
+            self.log("Benchmark not started: " + " ".join(errs))
+            return
+        cells, runs = br.count_runs(cfg)
+        label = f"{'Scheduled' if scheduled else 'Benchmark'}: {cells} cells / {runs} runs -> {br.out_csv(cfg).name}"
+        self._bench_start(label, br.command(cfg, self.settings))
+
+    def stop_benchmark(self) -> None:
+        if self.bench.running:
+            self.log(f"Benchmark: stopping '{self.bench.label}' (rows already written are kept).")
+            self.bench.stop()
+
+    def bench_free_check(self, label: str) -> None:
+        scratch = self.settings.temp_path / "bench_fake"
+        self._bench_start(label, br.free_check_commands(scratch)[label])
+
+    def _bench_script(self, label: str, cmd: list[str], open_after: Path) -> None:
+        """summarize.py / plot.py: short, so they run beside a benchmark in their own thread."""
+        def job() -> None:
+            env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONPATH": str(br.REPO)}
+            r = subprocess.run(cmd, cwd=str(br.REPO), env=env, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace")
+            if r.returncode == 0:
+                self.events.put(UIEvent("log", payload={"text": f"Benchmark: {label} written: {open_after}"}))
+                open_path(open_after)
+            else:
+                err = (r.stderr or r.stdout).strip().splitlines()[-1:] or ["unknown error"]
+                self.events.put(UIEvent("log", payload={"text": f"Benchmark: {label} failed: {err[0]}"}))
+        threading.Thread(target=job, daemon=True, name="ecogent-bench-script").start()
+
+    def bench_summary(self, paths: list) -> None:
+        if not paths:
+            self.log("Benchmark: tick a result file first.")
+            return
+        name = paths[0].stem if len(paths) == 1 else "combined"
+        out = br.RESULTS / f"{name}_summary.md"
+        self._bench_script("summary", [sys.executable, str(br.BENCH / "summarize.py"), *map(str, paths),
+                                       "--out", str(out)], out)
+
+    def bench_figures(self, paths: list) -> None:
+        if not paths:
+            self.log("Benchmark: tick a result file first.")
+            return
+        out = br.RESULTS / "figures" / (paths[0].stem if len(paths) == 1 else "combined")
+        self._bench_script("figures", [sys.executable, str(br.BENCH / "plot.py"), *map(str, paths),
+                                       "--out", str(out)], out)
+
+    def _bench_event(self, ev: UIEvent) -> None:
+        p = ev.payload
+        d = self._bench_dialog_alive()
+        if ev.kind == "bench_line":
+            self.bench_lines.append(p.get("text", ""))
+            if d:
+                d.append(p.get("text", ""))
+        elif ev.kind == "bench_done":
+            code = p.get("code")
+            text = f"{p.get('label')}: finished" if code == 0 else f"{p.get('label')}: stopped / failed (exit {code})"
+            self.bench_lines.append(f"===== {text} =====")
+            self.log(f"Benchmark {text}")
+            free = next((k for k in br.free_check_commands(Path(".")) if k == p.get("label")), None)
+            if free:                        # remembered with the commit, for the paper-run checklist
+                pm.record_check(self.settings, free, code == 0)
+            if d:
+                d.append("")
+                d.refresh_files()
+                d.update_state()
+                d.paper_check()
+        elif ev.kind == "bench_report":
+            path, err = p.get("path"), p.get("error")
+            self.log(f"Paper report written: {path}" if path else f"Paper report failed: {err}")
+            if path:
+                open_path(Path(path))
+            if d:
+                d.report_finished(path, err)
+        elif ev.kind == "bench_due":
+            cfg = br.load_config(self.settings)
+            busy = self.bench.running or (cfg["schedule"].get("only_when_idle", True) and self.worker.busy)
+            if busy:
+                if not self._bench_postponed:
+                    self.log("Scheduled benchmark is due - waiting until the current work is finished.")
+                self._bench_postponed = True
+                return
+            self._bench_postponed = False
+            self.start_benchmark(cfg, scheduled=True)
+            if d:
+                d.cfg = br.load_config(self.settings)
+                d.update_state()
+
+    # ------------------------------------------------------------------ test lab
+    def open_testlab(self) -> None:
+        if self.lab_dialog is not None and dpg.does_item_exist(self.lab_dialog.tag):
+            dpg.focus_item(self.lab_dialog.tag)
+            return
+        ctl = LabControls(shop=self.shop, run_check=self.lab_check, check_running=lambda: self.lab_proc.running,
+                          lines=lambda: list(self.lab_lines), last_results=lambda: dict(self.lab_results))
+        self.lab_dialog = TestLabDialog(ctl)
+
+    def lab_check(self, label: str) -> None:
+        try:
+            self.lab_proc.start(label, ts.check_commands()[label])
+        except (RuntimeError, OSError) as e:
+            self.log(f"Test Lab: cannot start '{label}': {e}")
+            return
+        self.lab_lines.append(f"===== {label}  ({datetime.now():%H:%M:%S}) =====")
+
+    def _lab_event(self, ev: UIEvent) -> None:
+        p = ev.payload
+        d = self.lab_dialog if self.lab_dialog is not None and dpg.does_item_exist(self.lab_dialog.tag) else None
+        if ev.kind == "lab_line":
+            self.lab_lines.append(p.get("text", ""))
+            if d:
+                d.append(p.get("text", ""))
+            return
+        if ev.kind == "lab_shop":
+            state = p.get("state")
+            self.log({"running": f"Test shop running at {ts.PUBLIC_URL}", "starting": "Test shop starting...",
+                      "failed": "Test shop failed to start (see Test Lab log)", "stopped": "Test shop stopped."}.get(state, state))
+        elif ev.kind == "lab_done":
+            label = p.get("label", "")
+            ok = p.get("code") == 0
+            pm.record_check(self.settings, label, ok)
+            self.lab_results[label.replace("Shop ", "").capitalize()] = f"{'OK' if ok else 'FAILED'} at {datetime.now():%H:%M}"
+            self.lab_lines.append(f"===== {label}: {'passed' if ok else 'FAILED - see the lines above'} =====")
+            self.log(f"Test Lab: {label} {'passed' if ok else 'FAILED'}")
+        if d:
+            d.append("")
+            d.refresh()
+
     def _schedule_from_agent(self, chat_id: str, sched: dict) -> None:
         s = open_session(self.settings, chat_id)
         self.scheduler.add(chat_id, s.meta.get("title", chat_id) if s else chat_id,
@@ -875,6 +1073,10 @@ class EcogentApp:
             self.set_status("Error - see activity log", "err")
         elif k == "request":
             self._request(ev)
+        elif k.startswith("bench_"):
+            self._bench_event(ev)
+        elif k.startswith("lab_"):
+            self._lab_event(ev)
 
     def _request(self, ev: UIEvent) -> None:
         p = ev.payload

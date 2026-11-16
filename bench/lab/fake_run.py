@@ -115,7 +115,7 @@ def main() -> None:
     out.unlink(missing_ok=True)
     sys.argv = ["drift_bench", "--tasks", "papers_caching,jobs_python", "--variants", "ecogent,compile_only,nocache",
                 "--levels", "0,2,4", "--seeds", "1", "--price", "fake=1,2", "--out", str(out), "--headless",
-                "--port", "8792"]
+                "--port", "8792", "--debug-port", "9281"]
     drift_bench.main()
     rows = list(csv.DictReader(out.open(encoding="utf-8")))
     per_cell = {"ecogent": 1 + 3 * 2, "compile_only": 1 + 3 * 2, "nocache": 1 + 3}

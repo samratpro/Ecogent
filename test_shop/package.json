@@ -1,0 +1,22 @@
+{
+  "name": "test-shop",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Neutral test e-commerce site for the Ecogent benchmark (drift and content-change tests)",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "start": "node server.js --port 3010",
+    "dev": "vite",
+    "check": "node check.js"
+  },
+  "dependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-router-dom": "6.28.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "4.3.4",
+    "vite": "5.4.11"
+  }
+}

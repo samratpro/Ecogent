@@ -86,8 +86,11 @@ class BrowserSession:
 
     def _new_manager(self) -> BrowserManager:
         path = self._browser_path()
+        # Absolute: a relative --user-data-dir makes Chromium browsers fall back to the user's normal
+        # profile and hand the launch to the already-open window (tabs open there, no debug port).
+        profiles = str(self.settings.profile_path.resolve())
         try:
-            return BrowserManager(base_profile_dir=str(self.settings.profile_path), browser_path=path,
+            return BrowserManager(base_profile_dir=profiles, browser_path=path,
                                   debug_port=self.settings.debug_port)
         except (SystemExit, EOFError):
             # Auto-detection fell back to input(); use Playwright's bundled Chromium instead.
@@ -97,7 +100,7 @@ class BrowserSession:
                 raise BrowserError("No browser found. Set the browser path in Settings "
                                    "or run: python -m playwright install chromium")
             self.log(f"Using Playwright Chromium: {exe}")
-            return BrowserManager(base_profile_dir=str(self.settings.profile_path), browser_path=exe,
+            return BrowserManager(base_profile_dir=profiles, browser_path=exe,
                                   debug_port=self.settings.debug_port)
 
     @property
